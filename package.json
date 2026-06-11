@@ -1,0 +1,12 @@
+{
+  "name": "playwright-service",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.0.0",
+    "playwright": "^1.40.0"
+  }
+}
