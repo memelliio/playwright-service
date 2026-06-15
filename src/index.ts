@@ -23,8 +23,8 @@ app.get("/health", (c) => c.json({ status: "ok", type: "playwright-service" }));
 // POST /session — create a new browser session
 app.post("/session", ownerGate, async (c) => {
   try {
-    const { playwright } = await import("playwright");
-    const browser = await playwright.chromium.launch({ headless: true });
+    const { chromium } = await import("playwright");
+    const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
     const context = await browser.newContext();
     const page = await context.newPage();
 
