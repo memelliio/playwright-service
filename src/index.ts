@@ -101,11 +101,304 @@ function sqlText(value: string | null | undefined) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+function jsonSql(value: any) {
+  return `${sqlText(JSON.stringify(value))}::jsonb`;
+}
+
+async function creditEvent(customerId: string, provider: string, status: string, errorClass: string, message: string, raw?: any) {
+  await runtimeSql(`
+insert into control_store.credit_pull_events(id, customer_id, provider, attempted_at, status, error_class, message, raw)
+values(
+  gen_random_uuid()::text,
+  ${sqlText(customerId)},
+  ${sqlText(provider)},
+  now(),
+  ${sqlText(status)},
+  ${sqlText(errorClass)},
+  ${sqlText(message)},
+  ${raw == null ? "null" : jsonSql(raw)}
+)
+`).catch(() => {});
+}
+
+async function getRuntimeValue(key: string) {
+  const rows = await runtimeSql(
+    `select value from control_store.rail_runtime_config where key=${sqlText(key)} order by updated_at desc nulls last limit 1`
+  );
+  return rows[0]?.value || "";
+}
+
+async function getSmartCreditCredentials(customerId: string) {
+  const encKey = await getRuntimeValue("customer_data_enc_key");
+  if (!encKey) {
+    throw new Error("customer_data_enc_key missing");
+  }
+  const rows = await runtimeSql(`
+select
+  nullif(pgp_sym_decrypt(username_enc, ${sqlText(encKey)}), '') as username,
+  nullif(pgp_sym_decrypt(password_enc, ${sqlText(encKey)}), '') as password
+from control_store.customer_credentials
+where customer_id::text=${sqlText(customerId)}
+  and service ilike '%smartcredit%'
+order by updated_at desc
+limit 1
+`);
+  return {
+    username: rows[0]?.username || "",
+    password: rows[0]?.password || "",
+  };
+}
+
+function bureauOf(text: string) {
+  const t = String(text || "");
+  if (t.includes("TUC")) return "transunion";
+  if (t.includes("EXP")) return "experian";
+  if (t.includes("EQF") || t.includes("EFX")) return "equifax";
+  return "";
+}
+
+function extractScores(report: any) {
+  let inner = report;
+  if (report && typeof report.rawReport === "string") {
+    try {
+      inner = JSON.parse(report.rawReport);
+    } catch {}
+  }
+  let comps = inner?.BundleComponents?.BundleComponent || [];
+  if (!Array.isArray(comps)) comps = [comps];
+  const scores: Array<{ bureau: string; score: number }> = [];
+  comps.forEach((cp: any) => {
+    const cst = cp?.CreditScoreType;
+    if (!cst) return;
+    (Array.isArray(cst) ? cst : [cst]).forEach((sc: any) => {
+      const n = parseInt(sc?.riskScore, 10);
+      const b = bureauOf(sc?.["@Type"] || sc?.Type || cp?.["@Type"] || cp?.Type);
+      if (b && n >= 300 && n <= 900) scores.push({ bureau: b, score: n });
+    });
+  });
+  return { inner, comps, scores };
+}
+
+async function storeSmartCreditReport(customerId: string, report: any, email = "", pulledBy = "spawn_playwright_pull") {
+  const text = JSON.stringify(report);
+  const { comps, scores } = extractScores(report);
+  const pullId = `sc_${Buffer.from(customerId).toString("hex").slice(0, 10)}`;
+  await runtimeSql(`
+insert into control_store.credit_report_pulls(
+  id, customer_id, email, provider, raw_report, raw_size, component_count, pulled_by, pulled_at
+) values(
+  gen_random_uuid()::text,
+  ${sqlText(customerId)},
+  ${sqlText(email)},
+  'smartcredit',
+  ${jsonSql(report)},
+  ${text.length},
+  ${comps.length},
+  ${sqlText(pulledBy)},
+  now()
+)
+`);
+  for (const s of scores) {
+    await runtimeSql(`
+insert into control_store.credit_scores_detail(
+  id, customer_id, pull_id, bureau, vantage_score, raw, created_at
+) values(
+  gen_random_uuid()::text,
+  ${sqlText(customerId)},
+  ${sqlText(pullId)},
+  ${sqlText(s.bureau)},
+  ${s.score},
+  ${jsonSql(s)},
+  now()
+) on conflict do nothing
+`).catch(() => {});
+  }
+  const ex = scores.find((s) => s.bureau === "experian")?.score || null;
+  const tu = scores.find((s) => s.bureau === "transunion")?.score || null;
+  const eq = scores.find((s) => s.bureau === "equifax")?.score || null;
+  await runtimeSql(`
+update control_store.customers
+set port_status='report_pulled',
+    last_report_pulled_at=now()
+    ${ex ? `, experian_score=${Number(ex)}` : ""}
+    ${tu ? `, transunion_score=${Number(tu)}` : ""}
+    ${eq ? `, equifax_score=${Number(eq)}` : ""}
+where id::text=${sqlText(customerId)}
+`).catch(() => {});
+  await creditEvent(
+    customerId,
+    "smartcredit",
+    "success",
+    "fresh_report",
+    `Playwright SmartCredit report imported: ${comps.length} components, ${scores.length} scores`,
+    { component_count: comps.length, score_count: scores.length, bureaus: scores.map((s) => s.bureau) }
+  );
+  return { component_count: comps.length, score_count: scores.length, bureaus: scores.map((s) => s.bureau), raw_size: text.length };
+}
+
+function getPath(source: any, dotted: string) {
+  return String(dotted || "")
+    .split(".")
+    .filter(Boolean)
+    .reduce((acc: any, key: string) => (acc == null ? undefined : acc[key]), source);
+}
+
+async function runPlaywrightScript(handler: any, payload: any) {
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+  const context = await browser.newContext({
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+  });
+  const page = await context.newPage();
+  const state: any = { payload, handler, page, context };
+  try {
+    for (const step of handler.script || []) {
+      switch (step.op) {
+        case "load_customer_smartcredit_credentials": {
+          const customerId = String(payload[step.customer_id_from || "customer_id"] || "");
+          if (!customerId) throw new Error("missing customer_id in queued instruction payload");
+          state.customer_id = customerId;
+          state.credentials = await getSmartCreditCredentials(customerId);
+          if (!state.credentials.username || !state.credentials.password) {
+            await creditEvent(customerId, "smartcredit", "failed", "need_connect", "No SmartCredit credentials on file");
+            throw new Error("no smartcredit credentials on file");
+          }
+          break;
+        }
+        case "goto":
+          await page.goto(step.url, {
+            waitUntil: step.wait_until || "domcontentloaded",
+            timeout: Number(step.timeout_ms || 60000),
+          });
+          break;
+        case "fill":
+          await page.fill(step.selector, String(getPath(state, step.from) ?? ""));
+          break;
+        case "click":
+          await page.locator(step.selector).click();
+          break;
+        case "wait_for_url_not_contains":
+          await page.waitForURL((url) => !String(url).includes(String(step.value || "")), {
+            timeout: Number(step.timeout_ms || 60000),
+          });
+          break;
+        case "wait_for_load_state":
+          await page.waitForLoadState(step.state || "networkidle", {
+            timeout: Number(step.timeout_ms || 60000),
+          }).catch(() => {});
+          break;
+        case "assert_url_not_contains": {
+          const currentUrl = page.url();
+          if (currentUrl.includes(String(step.value || ""))) {
+            if (state.customer_id && step.credit_event) {
+              await creditEvent(
+                state.customer_id,
+                step.credit_event.provider || "smartcredit",
+                step.credit_event.status || "failed",
+                step.credit_event.error_class || "invalid_login",
+                step.credit_event.message || `URL contained forbidden value: ${step.value}`,
+                { current_url: currentUrl }
+              );
+            }
+            throw new Error(step.error || `url contained ${step.value}: ${currentUrl}`);
+          }
+          break;
+        }
+        case "capture_url":
+          state[step.target || "current_url"] = page.url();
+          break;
+        case "request_get_text": {
+          const headers: Record<string, string> = {};
+          Object.entries(step.headers || {}).forEach(([key, value]) => {
+            headers[key] = String(value);
+          });
+          if (step.cookie_from) {
+            const cookie = String(getPath(state, step.cookie_from) || "");
+            if (cookie) headers.Cookie = cookie;
+          }
+          const response = await context.request.get(step.url, {
+            headers,
+            timeout: Number(step.timeout_ms || 60000),
+          });
+          state[step.status_target || "last_status"] = response.status();
+          state[step.headers_target || "last_headers"] = response.headers();
+          state[step.target || "last_text"] = await response.text();
+          break;
+        }
+        case "request_post_form": {
+          const form: Record<string, string> = {};
+          Object.entries(step.form || {}).forEach(([key, value]) => {
+            form[key] = String(typeof value === "string" && value.startsWith("$")
+              ? getPath(state, value.slice(1)) ?? ""
+              : value);
+          });
+          const response = await context.request.post(step.url, {
+            form,
+            timeout: Number(step.timeout_ms || 60000),
+            maxRedirects: 0,
+          });
+          state[step.status_target || "last_status"] = response.status();
+          state[step.headers_target || "last_headers"] = response.headers();
+          const setCookie = response.headers()["set-cookie"] || "";
+          state[step.cookie_target || "login_cookie"] = (setCookie.match(/JSESSIONID=[^;]+/) || [""])[0];
+          state[step.target || "last_text"] = await response.text();
+          break;
+        }
+        case "assert_status_200": {
+          const status = Number(getPath(state, step.from || "last_status") || 0);
+          if (status >= 300 && status < 400) {
+            const location = String(getPath(state, `${step.headers_from || "last_headers"}.location`) || "");
+            if (location.includes(String(step.reactivation_contains || "reactivation"))) {
+              if (state.customer_id) {
+                await creditEvent(state.customer_id, "smartcredit", "needs_action", "needs_reactivation", "SmartCredit membership needs reactivation");
+              }
+              throw new Error(`smartcredit needs reactivation: ${location}`);
+            }
+            throw new Error(`report redirected: ${status} ${location}`);
+          }
+          if (status !== 200) throw new Error(step.error_prefix ? `${step.error_prefix} ${status}` : `status ${status}`);
+          break;
+        }
+        case "parse_json": {
+          const sourceText = String(getPath(state, step.from || "") || "");
+          try {
+            state[step.target || "json"] = JSON.parse(sourceText);
+          } catch {
+            throw new Error(step.error || "report not JSON");
+          }
+          break;
+        }
+        case "store_smartcredit_report": {
+          const customerId = String(state.customer_id || payload.customer_id || "");
+          const report = getPath(state, step.report_from || "report");
+          const email = String(getPath(state, step.email_from || "") || "");
+          state[step.target || "stored"] = await storeSmartCreditReport(customerId, report, email, step.pulled_by || "spawn_playwright_pull");
+          break;
+        }
+        default:
+          throw new Error(`unknown hotload script op: ${step.op}`);
+      }
+    }
+    return state;
+  } finally {
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
+
 async function loadHandlerRegistry() {
   const rows = await runtimeSql(
     `select value from control_store.memelli_hotload_config where config_key=${sqlText(HANDLER_CONFIG_KEY)} and status='active' order by version desc limit 1`
   );
   return rows[0]?.value || {};
+}
+
+async function loadHotloadValue(configKey: string) {
+  const rows = await runtimeSql(
+    `select value from control_store.memelli_hotload_config where config_key=${sqlText(configKey)} and status='active' order by version desc limit 1`
+  );
+  return rows[0]?.value || null;
 }
 
 async function claimWork() {
@@ -152,8 +445,27 @@ where id=${sqlText(id)};
 async function handleCreditMonitoring(work: any, registry: any) {
   const payload = extractJsonObject(String(work.instruction || ""));
   const workerConfig = registry?.workers?.[WORKER_NAME] || {};
-  const handler = workerConfig?.handlers?.[payload.contract] || {};
-  const route = handler.route || "/api/client_credit_pull";
+  const handlerRef = workerConfig?.handlers?.[payload.contract] || {};
+  const resolvedHandler =
+    handlerRef?.contract_key ? await loadHotloadValue(String(handlerRef.contract_key)) : handlerRef;
+  const handler = resolvedHandler || {};
+  const kind = handler.kind || handlerRef.kind || "route";
+  if (kind === "playwright_script") {
+    const state = await runPlaywrightScript(handler, payload);
+    return {
+      kind,
+      customer_id: state.customer_id,
+      login_url: state.current_url,
+      stored: state.stored,
+    };
+  }
+  if (!handler.kind) {
+    throw new Error(`invalid hotloaded handler for ${payload.contract}: route fallback disabled`);
+  }
+  if (handler.kind === "route") {
+    throw new Error(`legacy route handler rejected for ${payload.contract}: use a hotloaded script contract`);
+  }
+  const route = handler.route;
   const body: Record<string, any> = {};
   const bodyMap = handler.body_from_instruction || { customer_id: "customer_id" };
   for (const [target, source] of Object.entries(bodyMap)) {
@@ -162,7 +474,7 @@ async function handleCreditMonitoring(work: any, registry: any) {
   if (!body.customer_id && payload.customer_id) body.customer_id = payload.customer_id;
   if (!body.customer_id) throw new Error("missing customer_id in queued instruction payload");
   const result = await railPost(route, body);
-  return { route, body, result };
+  return { kind, route, body, result };
 }
 
 async function executeWork(work: any) {
