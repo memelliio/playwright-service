@@ -96,6 +96,29 @@ async function runtimeSql(sql: string) {
   return Array.isArray(json?.result?.rows) ? json.result.rows : Array.isArray(json?.rows) ? json.rows : [];
 }
 
+async function recordSpawnAnalytics(work: any, eventName: string, details: any = {}) {
+  const payload = {
+    work_id: work.id,
+    worker: WORKER_NAME,
+    lane: work.lane || null,
+    work_class: work.work_class || null,
+    analytic_key: work.analytic_key || null,
+    event: eventName,
+    ...details,
+  };
+  await runtimeSql(`
+insert into control_store.spawn_analytics_event(
+  id, event_category, event_name, properties, created_at
+) values(
+  ${sqlText(`spawn_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`)},
+  'spawn_worker',
+  ${sqlText(eventName)},
+  ${sqlText(JSON.stringify(payload))},
+  now()
+)
+`);
+}
+
 function sqlText(value: string | null | undefined) {
   if (value == null) return "null";
   return `'${String(value).replace(/'/g, "''")}'`;
@@ -503,18 +526,27 @@ async function drainOnce() {
       const work = await claimWork();
       if (!work) break;
       log("claimed", work.id, work.work_class, work.lane);
+      const startedAt = Date.now();
       try {
+        await recordSpawnAnalytics(work, "claimed", { status: "running" });
         const result = await executeWork(work);
+        await recordSpawnAnalytics(work, "completed", { status: "done", elapsed_ms: Date.now() - startedAt });
         await finishWork(work.id, "done", { ok: true, worker: WORKER_NAME, ...result }, `done:${work.id}`);
         log("done", work.id);
       } catch (error: any) {
+        const errorText = String(error?.message || error);
+        try {
+          await recordSpawnAnalytics(work, "failed", { status: "error", elapsed_ms: Date.now() - startedAt, error: errorText.slice(0, 500) });
+        } catch (analyticsError: any) {
+          log("analytics error", work.id, String(analyticsError?.message || analyticsError));
+        }
         await finishWork(
           work.id,
           "error",
-          { ok: false, worker: WORKER_NAME, error: String(error?.message || error) },
-          `error:${String(error?.message || error).slice(0, 400)}`
+          { ok: false, worker: WORKER_NAME, error: errorText },
+          `error:${errorText.slice(0, 400)}`
         );
-        log("error", work.id, String(error?.message || error));
+        log("error", work.id, errorText);
       }
     }
   } finally {
