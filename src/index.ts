@@ -317,12 +317,13 @@ async function runPlaywrightScript(handler: any, payload: any) {
             const cookie = String(getPath(state, step.cookie_from) || "");
             if (cookie) headers.Cookie = cookie;
           }
-          const response = await context.request.get(step.url, {
+          const response = await fetch(step.url, {
             headers,
-            timeout: Number(step.timeout_ms || 60000),
+            signal: AbortSignal.timeout(Number(step.timeout_ms || 60000)),
+            redirect: "manual",
           });
           state[step.status_target || "last_status"] = response.status();
-          state[step.headers_target || "last_headers"] = response.headers();
+          state[step.headers_target || "last_headers"] = Object.fromEntries(response.headers.entries());
           state[step.target || "last_text"] = await response.text();
           break;
         }
@@ -333,14 +334,16 @@ async function runPlaywrightScript(handler: any, payload: any) {
               ? getPath(state, value.slice(1)) ?? ""
               : value);
           });
-          const response = await context.request.post(step.url, {
-            form,
-            timeout: Number(step.timeout_ms || 60000),
-            maxRedirects: 0,
+          const response = await fetch(step.url, {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams(form).toString(),
+            signal: AbortSignal.timeout(Number(step.timeout_ms || 60000)),
+            redirect: "manual",
           });
           state[step.status_target || "last_status"] = response.status();
-          state[step.headers_target || "last_headers"] = response.headers();
-          const setCookie = response.headers()["set-cookie"] || "";
+          state[step.headers_target || "last_headers"] = Object.fromEntries(response.headers.entries());
+          const setCookie = response.headers.get("set-cookie") || "";
           state[step.cookie_target || "login_cookie"] = (setCookie.match(/JSESSIONID=[^;]+/) || [""])[0];
           state[step.target || "last_text"] = await response.text();
           break;
