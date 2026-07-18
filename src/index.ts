@@ -322,7 +322,7 @@ async function runPlaywrightScript(handler: any, payload: any) {
             signal: AbortSignal.timeout(Number(step.timeout_ms || 60000)),
             redirect: "manual",
           });
-          state[step.status_target || "last_status"] = response.status();
+          state[step.status_target || "last_status"] = response.status;
           state[step.headers_target || "last_headers"] = Object.fromEntries(response.headers.entries());
           state[step.target || "last_text"] = await response.text();
           break;
@@ -341,7 +341,7 @@ async function runPlaywrightScript(handler: any, payload: any) {
             signal: AbortSignal.timeout(Number(step.timeout_ms || 60000)),
             redirect: "manual",
           });
-          state[step.status_target || "last_status"] = response.status();
+          state[step.status_target || "last_status"] = response.status;
           state[step.headers_target || "last_headers"] = Object.fromEntries(response.headers.entries());
           const setCookie = response.headers.get("set-cookie") || "";
           state[step.cookie_target || "login_cookie"] = (setCookie.match(/JSESSIONID=[^;]+/) || [""])[0];
