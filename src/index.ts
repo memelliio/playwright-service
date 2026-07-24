@@ -593,6 +593,28 @@ async function startSpawnWorker() {
   setInterval(() => void drainOnce(), START_GUARD_MS);
 }
 
+function startSpinePulse() {
+  if (!DATABASE_URL) return;
+  const pulse = async () => {
+    const client = new Client({
+      connectionString: databaseUrlWithAppName(DATABASE_URL),
+      application_name: DB_APPLICATION_NAME,
+    } as any);
+    try {
+      await client.connect();
+      await client.query("select set_config('application_name', $1, false), pg_sleep(0.25)", [DB_APPLICATION_NAME]);
+    } catch (error) {
+      console.error("[PLAYWRIGHT-SERVICE] spine pulse error", error);
+    } finally {
+      try {
+        await client.end();
+      } catch {}
+    }
+  };
+  setInterval(() => void pulse(), 2000);
+  void pulse();
+}
+
 // Health check
 app.get("/health", (c) => c.json({ status: "ok", type: "playwright-service" }));
 app.get("/worker/health", async (c) => {
@@ -775,3 +797,4 @@ log(`Listening on port ${port}`);
 void startSpawnWorker().catch((error) => {
   console.error("[PLAYWRIGHT-SERVICE] failed to start spawn worker", error);
 });
+startSpinePulse();
