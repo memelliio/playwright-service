@@ -29,6 +29,7 @@ const DATABASE_URL =
   process.env.PGDATABASE_URL ||
   process.env.POSTGRES_URL ||
   "";
+const DB_APPLICATION_NAME = process.env.PGAPPNAME || "memelli-playwright-service";
 const WORKER_NAME = process.env.SPAWN_WORKER_NAME || "playwright_bureau_monitor";
 const HANDLER_CONFIG_KEY = process.env.SPAWN_HANDLER_CONFIG_KEY || "spawn.worker.handler_registry";
 const START_GUARD_MS = Math.max(15000, Number(process.env.SPAWN_GUARD_MS || "30000"));
@@ -126,6 +127,16 @@ function sqlText(value: string | null | undefined) {
 
 function jsonSql(value: any) {
   return `${sqlText(JSON.stringify(value))}::jsonb`;
+}
+
+function databaseUrlWithAppName(value: string) {
+  try {
+    const url = new URL(value);
+    url.searchParams.set("application_name", DB_APPLICATION_NAME);
+    return url.toString();
+  } catch {
+    return value;
+  }
 }
 
 async function creditEvent(customerId: string, provider: string, status: string, errorClass: string, message: string, raw?: any) {
@@ -559,9 +570,17 @@ async function startSpawnWorker() {
     log("spawn worker disabled: missing DATABASE_URL or admin key");
     return;
   }
-  const client = new Client({ connectionString: DATABASE_URL });
+  const client = new Client({
+    connectionString: databaseUrlWithAppName(DATABASE_URL),
+    application_name: DB_APPLICATION_NAME,
+  } as any);
   await client.connect();
   await client.query(`listen ${SPAWN_CHANNEL}`);
+  setInterval(() => {
+    client.query("select 1 as memelli_playwright_service_heartbeat").catch((error) => {
+      console.error("[PLAYWRIGHT-SERVICE] spine heartbeat error", error);
+    });
+  }, 5000);
   client.on("notification", () => {
     void drainOnce();
   });
