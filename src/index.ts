@@ -575,6 +575,7 @@ async function startSpawnWorker() {
     application_name: DB_APPLICATION_NAME,
   } as any);
   await client.connect();
+  await client.query(`set application_name to ${sqlText(DB_APPLICATION_NAME)}`);
   await client.query(`listen ${SPAWN_CHANNEL}`);
   setInterval(() => {
     client.query("select 1 as memelli_playwright_service_heartbeat").catch((error) => {
