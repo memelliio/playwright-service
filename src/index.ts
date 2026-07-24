@@ -602,7 +602,7 @@ function startSpinePulse() {
     } as any);
     try {
       await client.connect();
-      await client.query("select set_config('application_name', $1, false), pg_sleep(0.25)", [DB_APPLICATION_NAME]);
+      await client.query("select set_config('application_name', $1, false), pg_sleep(20)", [DB_APPLICATION_NAME]);
     } catch (error) {
       console.error("[PLAYWRIGHT-SERVICE] spine pulse error", error);
     } finally {
@@ -611,8 +611,12 @@ function startSpinePulse() {
       } catch {}
     }
   };
-  setInterval(() => void pulse(), 2000);
-  void pulse();
+  const loop = async () => {
+    while (true) {
+      await pulse();
+    }
+  };
+  void loop();
 }
 
 // Health check
