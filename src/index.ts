@@ -32,8 +32,9 @@ const DATABASE_URL =
 const DB_APPLICATION_NAME = process.env.PGAPPNAME || "memelli-playwright-service";
 const WORKER_NAME = process.env.SPAWN_WORKER_NAME || "playwright_bureau_monitor";
 const HANDLER_CONFIG_KEY = process.env.SPAWN_HANDLER_CONFIG_KEY || "spawn.worker.handler_registry";
-const START_GUARD_MS = Math.max(15000, Number(process.env.SPAWN_GUARD_MS || "30000"));
 let draining = false;
+let spawnListenerConnectedAt: string | null = null;
+let lastDrainError: string | null = null;
 
 // Owner gate middleware
 const ownerGate = async (c, next) => {
@@ -567,8 +568,7 @@ async function drainOnce() {
 
 async function startSpawnWorker() {
   if (!DATABASE_URL || !KEY) {
-    log("spawn worker disabled: missing DATABASE_URL or admin key");
-    return;
+    throw new Error("spawn worker requires DATABASE_URL and runtime authority");
   }
   const client = new Client({
     connectionString: databaseUrlWithAppName(DATABASE_URL),
@@ -577,50 +577,46 @@ async function startSpawnWorker() {
   await client.connect();
   await client.query(`set application_name to ${sqlText(DB_APPLICATION_NAME)}`);
   await client.query(`listen ${SPAWN_CHANNEL}`);
-  setInterval(() => {
-    client.query("select 1 as memelli_playwright_service_heartbeat").catch((error) => {
-      console.error("[PLAYWRIGHT-SERVICE] spine heartbeat error", error);
-    });
-  }, 5000);
+  spawnListenerConnectedAt = new Date().toISOString();
   client.on("notification", () => {
-    void drainOnce();
+    void drainOnce().then(() => {
+      lastDrainError = null;
+    }).catch((error) => {
+      lastDrainError = String(error?.message || error);
+      console.error("[PLAYWRIGHT-SERVICE] event drain failed", error);
+    });
   });
   client.on("error", (error) => {
     console.error("[PLAYWRIGHT-SERVICE] spawn listener error", error);
+    process.exit(1);
+  });
+  client.on("end", () => {
+    console.error("[PLAYWRIGHT-SERVICE] spawn listener ended");
+    process.exit(1);
   });
   log(`spawn worker listening on ${SPAWN_CHANNEL} via ${WORKER_NAME}`);
-  void drainOnce();
-  setInterval(() => void drainOnce(), START_GUARD_MS);
-}
-
-function startSpinePulse() {
-  if (!DATABASE_URL) return;
-  const pulse = async () => {
-    const client = new Client({
-      connectionString: databaseUrlWithAppName(DATABASE_URL),
-      application_name: DB_APPLICATION_NAME,
-    } as any);
-    try {
-      await client.connect();
-      await client.query("select set_config('application_name', $1, false), pg_sleep(20)", [DB_APPLICATION_NAME]);
-    } catch (error) {
-      console.error("[PLAYWRIGHT-SERVICE] spine pulse error", error);
-    } finally {
-      try {
-        await client.end();
-      } catch {}
-    }
-  };
-  const loop = async () => {
-    while (true) {
-      await pulse();
-    }
-  };
-  void loop();
+  void drainOnce().then(() => {
+    lastDrainError = null;
+  }).catch((error) => {
+    lastDrainError = String(error?.message || error);
+    console.error("[PLAYWRIGHT-SERVICE] initial drain failed", error);
+  });
 }
 
 // Health check
-app.get("/health", (c) => c.json({ status: "ok", type: "playwright-service" }));
+app.get("/health", (c) => c.json({
+  status: spawnListenerConnectedAt ? "ok" : "fail",
+  type: "playwright-service",
+  residentSpine: {
+    applicationName: DB_APPLICATION_NAME,
+    channel: SPAWN_CHANNEL,
+    connectedAt: spawnListenerConnectedAt,
+  },
+  worker: {
+    name: WORKER_NAME,
+    lastDrainError,
+  },
+}, spawnListenerConnectedAt ? 200 : 503));
 app.get("/worker/health", async (c) => {
   try {
     const rows = await runtimeSql(
@@ -791,6 +787,7 @@ app.delete("/session", ownerGate, async (c) => {
 });
 
 // Start server
+await startSpawnWorker();
 Bun.serve({
   hostname: "::",
   port,
@@ -798,7 +795,3 @@ Bun.serve({
 });
 
 log(`Listening on port ${port}`);
-void startSpawnWorker().catch((error) => {
-  console.error("[PLAYWRIGHT-SERVICE] failed to start spawn worker", error);
-});
-startSpinePulse();
