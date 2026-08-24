@@ -35,6 +35,9 @@ const HANDLER_CONFIG_KEY = process.env.SPAWN_HANDLER_CONFIG_KEY || "spawn.worker
 let draining = false;
 let spawnListenerConnectedAt: string | null = null;
 let lastDrainError: string | null = null;
+let spawnWorkerStarting = false;
+let spawnWorkerRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let spawnWorkerLastAttemptAt: string | null = null;
 
 // Owner gate middleware
 const ownerGate = async (c, next) => {
@@ -567,6 +570,8 @@ async function drainOnce() {
 }
 
 async function startSpawnWorker() {
+  spawnWorkerStarting = true;
+  spawnWorkerLastAttemptAt = new Date().toISOString();
   if (!DATABASE_URL || !KEY) {
     throw new Error("spawn worker requires DATABASE_URL and runtime authority");
   }
@@ -587,12 +592,16 @@ async function startSpawnWorker() {
     });
   });
   client.on("error", (error) => {
+    spawnListenerConnectedAt = null;
+    lastDrainError = String(error?.message || error);
     console.error("[PLAYWRIGHT-SERVICE] spawn listener error", error);
-    process.exit(1);
+    scheduleSpawnWorkerReconnect();
   });
   client.on("end", () => {
+    spawnListenerConnectedAt = null;
+    lastDrainError = "spawn listener ended";
     console.error("[PLAYWRIGHT-SERVICE] spawn listener ended");
-    process.exit(1);
+    scheduleSpawnWorkerReconnect();
   });
   log(`spawn worker listening on ${SPAWN_CHANNEL} via ${WORKER_NAME}`);
   void drainOnce().then(() => {
@@ -603,9 +612,36 @@ async function startSpawnWorker() {
   });
 }
 
+function scheduleSpawnWorkerReconnect(delayMs = Number(process.env.SPAWN_WORKER_RETRY_MS || 15000)) {
+  if (spawnWorkerRetryTimer || spawnWorkerStarting) return;
+  spawnWorkerRetryTimer = setTimeout(() => {
+    spawnWorkerRetryTimer = null;
+    void startSpawnWorker().catch((error) => {
+      spawnListenerConnectedAt = null;
+      lastDrainError = String(error?.message || error);
+      console.error("[PLAYWRIGHT-SERVICE] spawn worker start failed", error);
+      scheduleSpawnWorkerReconnect();
+    }).finally(() => {
+      spawnWorkerStarting = false;
+    });
+  }, Math.max(delayMs, 1000));
+}
+
+function bootSpawnWorker() {
+  void startSpawnWorker().catch((error) => {
+    spawnWorkerStarting = false;
+    spawnListenerConnectedAt = null;
+    lastDrainError = String(error?.message || error);
+    console.error("[PLAYWRIGHT-SERVICE] spawn worker start failed", error);
+    scheduleSpawnWorkerReconnect();
+  }).finally(() => {
+    spawnWorkerStarting = false;
+  });
+}
+
 // Health check
 app.get("/health", (c) => c.json({
-  status: spawnListenerConnectedAt ? "ok" : "fail",
+  status: "ok",
   type: "playwright-service",
   residentSpine: {
     applicationName: DB_APPLICATION_NAME,
@@ -614,9 +650,12 @@ app.get("/health", (c) => c.json({
   },
   worker: {
     name: WORKER_NAME,
+    connected: Boolean(spawnListenerConnectedAt),
+    starting: spawnWorkerStarting,
+    lastAttemptAt: spawnWorkerLastAttemptAt,
     lastDrainError,
   },
-}, spawnListenerConnectedAt ? 200 : 503));
+}));
 app.get("/worker/health", async (c) => {
   try {
     const rows = await runtimeSql(
@@ -786,8 +825,6 @@ app.delete("/session", ownerGate, async (c) => {
   }
 });
 
-// Start server
-await startSpawnWorker();
 Bun.serve({
   hostname: "::",
   port,
@@ -795,3 +832,4 @@ Bun.serve({
 });
 
 log(`Listening on port ${port}`);
+bootSpawnWorker();
