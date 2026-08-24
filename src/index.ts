@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import pg from "pg";
 
 const app = new Hono();
-const { Client } = pg;
+const { Client, Pool } = pg;
 
 const port = Number(process.env.PORT) || 3000;
 const sessions = new Map<string, any>();
@@ -27,6 +27,8 @@ const KEY =
 const DATABASE_URL =
   process.env.DATABASE_URL ||
   process.env.PGDATABASE_URL ||
+  process.env.MEMELLI_PGBOUNCER_PRIVATE_URL ||
+  process.env.DATABASE_PUBLIC_URL ||
   process.env.POSTGRES_URL ||
   "";
 const DB_APPLICATION_NAME = process.env.PGAPPNAME || "memelli-playwright-service";
@@ -38,6 +40,15 @@ let lastDrainError: string | null = null;
 let spawnWorkerStarting = false;
 let spawnWorkerRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let spawnWorkerLastAttemptAt: string | null = null;
+const dbPool = DATABASE_URL
+  ? new Pool({
+      connectionString: databaseUrlWithAppName(DATABASE_URL),
+      application_name: DB_APPLICATION_NAME,
+      max: Number(process.env.PG_POOL_MAX || 2),
+      connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS || 8000),
+      idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 30000),
+    } as any)
+  : null;
 
 // Owner gate middleware
 const ownerGate = async (c, next) => {
@@ -90,15 +101,9 @@ async function railPost(path: string, body: any) {
 }
 
 async function runtimeSql(sql: string) {
-  const json = await railPost("/api/memelli/runtime/exec", {
-    command: "sql",
-    admin_key: KEY,
-    actor_lane: "playwright-service",
-    writer_path: "playwright-service/src/index.ts",
-    source_proof: "spawn worker runtime execution",
-    args: { sql },
-  });
-  return Array.isArray(json?.result?.rows) ? json.result.rows : Array.isArray(json?.rows) ? json.rows : [];
+  if (!dbPool) throw new Error("database connection missing");
+  const result = await dbPool.query(sql);
+  return result.rows || [];
 }
 
 async function recordSpawnAnalytics(work: any, eventName: string, details: any = {}) {
