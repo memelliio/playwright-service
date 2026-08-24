@@ -40,6 +40,7 @@ let lastDrainError: string | null = null;
 let spawnWorkerStarting = false;
 let spawnWorkerRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let spawnWorkerLastAttemptAt: string | null = null;
+let spawnWorkerSafetyDrainTimer: ReturnType<typeof setInterval> | null = null;
 const dbPool = DATABASE_URL
   ? new Pool({
       connectionString: databaseUrlWithAppName(DATABASE_URL),
@@ -588,6 +589,22 @@ async function startSpawnWorker() {
   await client.query(`set application_name to ${sqlText(DB_APPLICATION_NAME)}`);
   await client.query(`listen ${SPAWN_CHANNEL}`);
   spawnListenerConnectedAt = new Date().toISOString();
+  void drainOnce().then(() => {
+    lastDrainError = null;
+  }).catch((error) => {
+    lastDrainError = String(error?.message || error);
+    console.error("[PLAYWRIGHT-SERVICE] boot drain failed", error);
+  });
+  if (!spawnWorkerSafetyDrainTimer) {
+    spawnWorkerSafetyDrainTimer = setInterval(() => {
+      void drainOnce().then(() => {
+        lastDrainError = null;
+      }).catch((error) => {
+        lastDrainError = String(error?.message || error);
+        console.error("[PLAYWRIGHT-SERVICE] safety drain failed", error);
+      });
+    }, Number(process.env.SPAWN_WORKER_SAFETY_DRAIN_MS || 60000));
+  }
   client.on("notification", () => {
     void drainOnce().then(() => {
       lastDrainError = null;
@@ -669,6 +686,19 @@ app.get("/worker/health", async (c) => {
     return c.json({ ok: true, worker: WORKER_NAME, rail: RAIL, pending: rows[0]?.pending ?? null });
   } catch (error: any) {
     return c.json({ ok: false, worker: WORKER_NAME, error: String(error?.message || error) }, 500);
+  }
+});
+app.post("/worker/drain", ownerGate, async (c) => {
+  try {
+    await drainOnce();
+    lastDrainError = null;
+    const rows = await runtimeSql(
+      `select count(*)::int as pending from control_store.spawn_work where status='pending' and (work_class='executor_credit_monitoring' or lane='credit_monitoring')`
+    );
+    return c.json({ ok: true, worker: WORKER_NAME, pending: rows[0]?.pending ?? null });
+  } catch (error: any) {
+    lastDrainError = String(error?.message || error);
+    return c.json({ ok: false, worker: WORKER_NAME, error: lastDrainError }, 500);
   }
 });
 
