@@ -78,6 +78,67 @@ function extractJsonObject(text: string) {
   }
 }
 
+function extractBalancedObject(text: string, fromIndex: number): any | null {
+  let searchStart = fromIndex;
+  for (let attempts = 0; attempts < 40; attempts++) {
+    const braceIdx = text.lastIndexOf("{", searchStart);
+    if (braceIdx < 0) return null;
+    let depth = 0;
+    let inStr = false;
+    let strCh = "";
+    let esc = false;
+    for (let i = braceIdx; i < text.length; i++) {
+      const c = text[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === strCh) inStr = false;
+        continue;
+      }
+      if (c === "\"" || c === "'") {
+        inStr = true;
+        strCh = c;
+        continue;
+      }
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          if (i >= fromIndex) {
+            try {
+              return JSON.parse(text.slice(braceIdx, i + 1));
+            } catch {}
+          }
+          break;
+        }
+      }
+    }
+    searchStart = braceIdx - 1;
+  }
+  return null;
+}
+
+const REPORT_MARKERS = /BundleComponents|TrueLinkCreditReportType|TradeLinePartition|rawReport/;
+
+function extractReportJson(text: string): any | null {
+  try {
+    const direct = JSON.parse(text);
+    if (direct && typeof direct === "object") return direct;
+  } catch {}
+  const scriptRe = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = scriptRe.exec(text))) {
+    const body = match[1].trim();
+    if (!body || (body[0] !== "{" && body[0] !== "[")) continue;
+    try {
+      const parsed = JSON.parse(body);
+      if (REPORT_MARKERS.test(JSON.stringify(parsed))) return parsed;
+    } catch {}
+  }
+  const idx = text.search(REPORT_MARKERS);
+  return idx >= 0 ? extractBalancedObject(text, idx) : null;
+}
+
 async function railPost(path: string, body: any) {
   const response = await fetch(`${RAIL}${path}`, {
     method: "POST",
@@ -280,6 +341,111 @@ where id::text=${sqlText(customerId)}
   return { component_count: comps.length, score_count: scores.length, bureaus: scores.map((s) => s.bureau), raw_size: text.length };
 }
 
+async function cookieHeaderFromContext(context: any) {
+  const cookies = await context.cookies().catch(() => []);
+  return cookies.map((cookie: any) => `${cookie.name}=${cookie.value}`).join("; ");
+}
+
+async function runSmartCreditOAuthPull(state: any, payload: any, step: any) {
+  const customerId = String(state.customer_id || payload.customer_id || "");
+  if (!customerId) throw new Error("missing customer_id in queued instruction payload");
+  if (!state.credentials?.username || !state.credentials?.password) {
+    state.customer_id = customerId;
+    state.credentials = await getSmartCreditCredentials(customerId);
+  }
+  if (!state.credentials?.username || !state.credentials?.password) {
+    await creditEvent(customerId, "smartcredit", "failed", "need_connect", "No SmartCredit credentials on file");
+    throw new Error("no smartcredit credentials on file");
+  }
+
+  const clientId = step.client_id || "117dfa4a-e9e3-4268-98de-a89cf34cd67e";
+  const redirect = step.redirect_uri || "https://member.smartcredit.com/auth";
+  const authz = step.authorize_url || "https://auth.smartcredit.com/oauth2/authorize";
+  const pageUrl = `${authz}/?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirect)}&response_type=code&scope=${encodeURIComponent(step.scope || "openid offline_access")}`;
+
+  await state.page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: Number(step.timeout_ms || 90000) });
+  await state.page.locator('input[name="loginId"], input#loginId, input[type="email"]').first().fill(String(state.credentials.username), { timeout: Number(step.timeout_ms || 30000) });
+  await state.page.locator('input[name="password"], input#password, input[type="password"]').first().fill(String(state.credentials.password), { timeout: Number(step.timeout_ms || 30000) });
+
+  const submit = state.page.locator('button[type="submit"], input[type="submit"], button:has-text("Log In"), button:has-text("Login"), button:has-text("Sign In")').first();
+  await Promise.all([
+    state.page.waitForLoadState("domcontentloaded", { timeout: Number(step.timeout_ms || 90000) }).catch(() => {}),
+    submit.click({ timeout: Number(step.timeout_ms || 30000) }),
+  ]);
+
+  let code = "";
+  for (let hop = 0; hop < 12; hop++) {
+    const current = state.page.url();
+    try {
+      const url = new URL(current);
+      if (current.startsWith(redirect) && url.searchParams.get("code")) {
+        code = String(url.searchParams.get("code"));
+        break;
+      }
+      if (/reactivat/i.test(current)) {
+        await creditEvent(customerId, "smartcredit", "needs_action", "needs_reactivation", "SmartCredit membership needs reactivation");
+        throw new Error(`smartcredit needs reactivation: ${current}`);
+      }
+    } catch {}
+    await state.page.waitForTimeout(1000);
+  }
+  if (!code) {
+    await creditEvent(customerId, "smartcredit", "needs_action", "oauth_authorization_failed", "No authorization code returned");
+    throw new Error(`SmartCredit did not complete the authorization step: ${state.page.url()}`);
+  }
+
+  const cookieHeader = await cookieHeaderFromContext(state.context);
+  const tokenRes = await fetch(`https://api.smartcredit.com/v1/login?code=${encodeURIComponent(code)}&redirect_uri=${encodeURIComponent(redirect)}&response_type=code`, {
+    headers: { Cookie: cookieHeader, Accept: "application/json" },
+  });
+  const tokenText = await tokenRes.text();
+  let tokenJson: any = {};
+  try {
+    tokenJson = JSON.parse(tokenText);
+  } catch {}
+  const accessToken = tokenJson?.access_token;
+  if (!accessToken) {
+    const accountStatus = String(tokenJson?.accountStatus || "").toUpperCase();
+    const otcRequired = Boolean(tokenJson?.otc);
+    const detail = `token exchange ${tokenRes.status}${accountStatus ? ` accountStatus=${accountStatus}` : ""}${otcRequired ? " otc" : ""}: ${tokenText.slice(0, 300).replace(/\s+/g, " ")}`;
+    if (accountStatus && accountStatus !== "ACTIVE") {
+      await creditEvent(customerId, "smartcredit", "needs_action", `account_${accountStatus.toLowerCase()}`, detail);
+      throw new Error(`SmartCredit account is ${accountStatus}`);
+    }
+    if (otcRequired) {
+      await creditEvent(customerId, "smartcredit", "needs_action", "otc_required", detail);
+      throw new Error("SmartCredit is asking for a one-time code");
+    }
+    await creditEvent(customerId, "smartcredit", "failed", "oauth_token_exchange_failed", detail);
+    throw new Error("SmartCredit did not issue a session");
+  }
+
+  const reportRes = await fetch(step.report_url || "https://api.smartcredit.com/v1/credit/3bs/current", {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+  });
+  const reportText = await reportRes.text();
+  if (reportRes.status === 403) {
+    await creditEvent(customerId, "smartcredit", "needs_action", "report_not_in_plan", `report fetch refused after a successful login (${reportRes.status})`);
+    throw new Error("SmartCredit plan does not include the 3-bureau report");
+  }
+  if (reportRes.status === 401) {
+    await creditEvent(customerId, "smartcredit", "needs_action", "report_unauthorized", `report fetch rejected after authorization (${reportRes.status})`);
+    throw new Error("SmartCredit authorized the login but rejected the report request");
+  }
+  if (reportRes.status === 404) {
+    await creditEvent(customerId, "smartcredit", "needs_action", "no_3b_ordered", "No 3-bureau report has been ordered on this account");
+    throw new Error("No 3-bureau report on this account yet");
+  }
+  if (reportRes.status !== 200) throw new Error(`SmartCredit report status ${reportRes.status}`);
+  const report = extractReportJson(reportText);
+  if (!report) {
+    await creditEvent(customerId, "smartcredit", "failed", "report_unrecognized", "3bs/current response had no recognizable report payload");
+    throw new Error("report not recognized");
+  }
+
+  return await storeSmartCreditReport(customerId, report, String(payload.email || ""), step.pulled_by || "spawn_playwright_oauth_pull");
+}
+
 function getPath(source: any, dotted: string) {
   return String(dotted || "")
     .split(".")
@@ -421,6 +587,10 @@ async function runPlaywrightScript(handler: any, payload: any) {
           const report = getPath(state, step.report_from || "report");
           const email = String(getPath(state, step.email_from || "") || "");
           state[step.target || "stored"] = await storeSmartCreditReport(customerId, report, email, step.pulled_by || "spawn_playwright_pull");
+          break;
+        }
+        case "smartcredit_oauth_pull": {
+          state[step.target || "stored"] = await runSmartCreditOAuthPull(state, payload, step);
           break;
         }
         default:
