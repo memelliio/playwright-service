@@ -969,6 +969,64 @@ app.post("/click", ownerGate, async (c) => {
 });
 
 // POST /submit — submit form
+// POST /select - set a <select> by VISIBLE LABEL, then read back what actually landed.
+// Built 2026-08-25. `fill` refuses a <select> ("Element is not an <input>..."), which blocked the
+// FTC identity-theft walk at four selects: DoTMM, DoTYY, primePhoneType, twoFactorType.
+//
+// Label, never value: the FTC option values are meaningless indices like "2: 0".
+//
+// The readback is the point. On 2026-08-25 native typeahead on this same form silently set
+// UZBEKISTAN for country, 1998 for a 1970 date of birth and 2025 for a 2021 theft year - and the
+// form still reported ZERO invalid fields. A form can be fully valid and fully wrong, and an FTC
+// identity theft report is permanent and cannot be amended. So this verb refuses on mismatch
+// instead of reporting success.
+app.post("/select", ownerGate, async (c) => {
+  try {
+    const { sessionId, selector, label } = await c.req.json();
+    const session = sessions.get(sessionId);
+    if (!session) return c.json({ error: "Session not found" }, 404);
+    if (typeof label !== "string" || !label.length) {
+      return c.json({ error: "select: label is required (visible option text, not value)" }, 400);
+    }
+
+    await session.page.selectOption(selector, { label });
+
+    const landed = await session.page.locator(selector).evaluate((el) => {
+      const s = el as HTMLSelectElement;
+      return (s.options[s.selectedIndex] || { text: "" }).text.trim();
+    });
+
+    if (landed.toLowerCase() !== label.trim().toLowerCase()) {
+      return c.json({
+        error: "select_readback_mismatch",
+        details: "wanted " + JSON.stringify(label) + " but the control holds " + JSON.stringify(landed),
+        selector, wanted: label, got: landed,
+      }, 409);
+    }
+    return c.json({ status: "selected", selector, label, verified: landed });
+  } catch (error) {
+    console.error("[PLAYWRIGHT] Error:", error);
+    return c.json({ error: "Failed to select", details: error.message }, 500);
+  }
+});
+
+// POST /eval - read page state. Without this a walk can only infer state from a click status,
+// which is how a cleared required field went unnoticed.
+app.post("/eval", ownerGate, async (c) => {
+  try {
+    const { sessionId, expression } = await c.req.json();
+    const session = sessions.get(sessionId);
+    if (!session) return c.json({ error: "Session not found" }, 404);
+    const result = await session.page.evaluate((src) => {
+      return Function('"use strict";return (' + src + ")")();
+    }, expression);
+    return c.json({ status: "evaluated", result });
+  } catch (error) {
+    console.error("[PLAYWRIGHT] Error:", error);
+    return c.json({ error: "Failed to evaluate", details: error.message }, 500);
+  }
+});
+
 app.post("/submit", ownerGate, async (c) => {
   try {
     const { sessionId, selector } = await c.req.json();
