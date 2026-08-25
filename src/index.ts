@@ -877,11 +877,27 @@ app.post("/session", ownerGate, async (c) => {
   try {
     const { chromium } = await import("playwright");
     const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
-    const context = await browser.newContext();
+    // acceptDownloads is what makes a native browser download recoverable. Without it Chromium
+    // cancels the download and NOTHING reaches disk - measured 2026-08-25 on a one-time FTC
+    // identity theft report: the button was clicked for real, the page emitted its analytics
+    // event, and no file existed anywhere in the container. The document was unrecoverable.
+    const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();
 
     const sessionId = Math.random().toString(36).substring(7);
-    sessions.set(sessionId, { browser, context, page });
+    const downloads: any[] = [];
+    // Capture EVERY download the moment it starts. Do not wait to be asked - a one-time
+    // document is gone by the time anyone thinks to ask for it.
+    page.on("download", async (d) => {
+      const rec: any = { filename: d.suggestedFilename(), url: d.url(), at: new Date().toISOString() };
+      try {
+        rec.path = await d.path();
+        rec.failure = await d.failure();
+      } catch (e) { rec.error = String(e && e.message || e); }
+      downloads.push(rec);
+      console.log("[PLAYWRIGHT] download captured:", JSON.stringify(rec));
+    });
+    sessions.set(sessionId, { browser, context, page, downloads });
 
     return c.json({ sessionId, status: "created" });
   } catch (error) {
@@ -980,6 +996,65 @@ app.post("/click", ownerGate, async (c) => {
 // form still reported ZERO invalid fields. A form can be fully valid and fully wrong, and an FTC
 // identity theft report is permanent and cannot be amended. So this verb refuses on mismatch
 // instead of reporting success.
+// GET-style list of everything this session has downloaded.
+app.post("/downloads", ownerGate, async (c) => {
+  try {
+    const { sessionId } = await c.req.json();
+    const session = sessions.get(sessionId);
+    if (!session) return c.json({ error: "Session not found" }, 404);
+    const list = (session.downloads || []).map((d: any, i: number) => ({
+      index: i, filename: d.filename, url: d.url, at: d.at, path: d.path || null,
+      error: d.error || d.failure || null,
+    }));
+    return c.json({ status: "ok", count: list.length, downloads: list });
+  } catch (error) {
+    console.error("[PLAYWRIGHT] Error:", error);
+    return c.json({ error: "Failed to list downloads", details: error.message }, 500);
+  }
+});
+
+// POST /download - click something that triggers a native download and RETURN THE FILE.
+// Built 2026-08-25 after a one-time FTC identity theft report PDF was lost: the click fired,
+// the analytics beacon fired, and the file never existed because downloads were not accepted.
+// Never report success without bytes - an empty capture is the failure this verb exists to stop.
+app.post("/download", ownerGate, async (c) => {
+  try {
+    const { sessionId, selector, index, timeout } = await c.req.json();
+    const session = sessions.get(sessionId);
+    if (!session) return c.json({ error: "Session not found" }, 404);
+
+    let rec: any = null;
+    if (typeof index === "number") {
+      rec = (session.downloads || [])[index];
+      if (!rec) return c.json({ error: "no_download_at_index", have: (session.downloads || []).length }, 404);
+    } else {
+      if (!selector) return c.json({ error: "download: selector or index required" }, 400);
+      const waiter = session.page.waitForEvent("download", { timeout: Number(timeout) || 60000 });
+      await session.page.click(selector);
+      const d = await waiter;
+      rec = { filename: d.suggestedFilename(), url: d.url(), path: await d.path(), at: new Date().toISOString() };
+    }
+
+    if (!rec.path) {
+      return c.json({ error: "download_had_no_path", detail: rec.error || rec.failure || null, rec }, 502);
+    }
+    const bytes = await Bun.file(rec.path).arrayBuffer();
+    if (!bytes || bytes.byteLength === 0) {
+      return c.json({ error: "download_was_empty", rec }, 502);
+    }
+    return c.json({
+      status: "downloaded",
+      filename: rec.filename,
+      url: rec.url,
+      bytes: bytes.byteLength,
+      base64: Buffer.from(bytes).toString("base64"),
+    });
+  } catch (error) {
+    console.error("[PLAYWRIGHT] Error:", error);
+    return c.json({ error: "Failed to download", details: error.message }, 500);
+  }
+});
+
 app.post("/select", ownerGate, async (c) => {
   try {
     const { sessionId, selector, label } = await c.req.json();
