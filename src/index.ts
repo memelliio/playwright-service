@@ -287,8 +287,10 @@ function extractScores(report: any) {
 async function storeSmartCreditReport(customerId: string, report: any, email = "", pulledBy = "spawn_playwright_pull") {
   const text = JSON.stringify(report);
   const { comps, scores } = extractScores(report);
-  const pullId = `sc_${Buffer.from(customerId).toString("hex").slice(0, 10)}`;
-  await runtimeSql(`
+  /* The row own id, not a derived one. A pull whose id nobody holds cannot be decomposed,
+     cited, or re-run: measured 2026-08-25, the 08-24 pull for a real client was stored with a
+     NULL id and every reader downstream silently fell back to an 11-day-old decomposition. */
+  const inserted = await runtimeSql(`
 insert into control_store.credit_report_pulls(
   id, customer_id, email, provider, raw_report, raw_size, component_count, pulled_by, pulled_at
 ) values(
@@ -302,7 +304,10 @@ insert into control_store.credit_report_pulls(
   ${sqlText(pulledBy)},
   now()
 )
+returning id
 `);
+  const pullId = String(inserted?.[0]?.id || "");
+  if (!pullId) throw new Error("credit_report_pulls insert returned no id - refusing to leave a pull unfilled");
   for (const s of scores) {
     await runtimeSql(`
 insert into control_store.credit_scores_detail(
@@ -338,7 +343,133 @@ where id::text=${sqlText(customerId)}
     `Playwright SmartCredit report imported: ${comps.length} components, ${scores.length} scores`,
     { component_count: comps.length, score_count: scores.length, bureaus: scores.map((s) => s.bureau) }
   );
-  return { component_count: comps.length, score_count: scores.length, bureaus: scores.map((s) => s.bureau), raw_size: text.length };
+  /* FILL THE PULL. A pull that is saved but never decomposed is worse than no pull.
+     Measured 2026-08-25: an FTC identity theft report was filed for a real client naming ONE
+     derogatory account because every reader was looking at an 11-day-old decomposition; the
+     fresh pull carried FIVE across all three bureaus, and the report cannot be amended.
+     The pull and the fill are ONE job, so a pull can never be left half done. */
+  const filled = await fillPull(customerId, pullId, report);
+  await creditEvent(
+    customerId,
+    "smartcredit",
+    filled.refused_no_bureau ? "needs_action" : "success",
+    filled.refused_no_bureau ? "fill_refused_rows" : "pull_filled",
+    `Filled ${filled.tradelines} tradelines ${JSON.stringify(filled.per_bureau)}, ${filled.negatives} negative`,
+    filled
+  );
+
+  return {
+    component_count: comps.length,
+    score_count: scores.length,
+    bureaus: scores.map((s) => s.bureau),
+    raw_size: text.length,
+    pull_id: pullId,
+    filled,
+  };
+}
+
+/* Word anchored. An unanchored /late/ matches "collateral" - measured, it failed a real client. */
+const DEROG_RE = [
+  /\bcharge[- ]?off\b/i, /\bcollection\b/i, /\brepossess/i, /\bforeclos/i, /\bbankrupt/i,
+  /\bwage earner\b/i, /\bchapter\s*(7|11|13)\b/i, /\b\d+\s*days? past due\b/i,
+  /\bderogatory\b/i, /\bdefault\b/i, /\bsettle/i, /\bwritten off\b/i,
+];
+
+/* Decompose ONE pull into the per bureau data homes.
+ *
+ * The bureau lives on each TradeLinePartition.Tradeline as a plain bureau field. Source is null,
+ * and the per bureau components (TUCReportV6 / EQFReportV6 / EXPReportV6) come back EMPTY - 22
+ * bytes each - so MergeCreditReports is the only component carrying data.
+ *
+ * NO FALLBACKS: a tradeline with no bureau is REFUSED and counted, never written as "merged".
+ * scripts/credit-lane/decompose-report.cjs hardcoded "merged" at both insert sites, which is why
+ * every negative item read merged and no CFPB complaint could ever resolve a bureau. */
+async function fillPull(customerId: string, pullId: string, report: any) {
+  const d = (n: any) => String(n?.description || n?.abbreviation || n?.symbol || "").trim();
+  const t2 = (v: any) => (v === undefined || v === null ? "" : String(v).trim());
+
+  const rawComp = report?.BundleComponents?.BundleComponent;
+  const comps = Array.isArray(rawComp) ? rawComp : rawComp ? [rawComp] : [];
+  const merged = comps.find((c: any) => t2(c.Type) === "MergeCreditReports")?.TrueLinkCreditReportType;
+  if (!merged) throw new Error("no MergeCreditReports component - refusing to guess a shape");
+  const partsRaw = merged.TradeLinePartition;
+  const parts = Array.isArray(partsRaw) ? partsRaw : partsRaw ? [partsRaw] : [];
+
+  const rows: any[] = [];
+  const refused: any[] = [];
+  for (const part of parts) {
+    const items = Array.isArray(part.Tradeline) ? part.Tradeline : part.Tradeline ? [part.Tradeline] : [];
+    for (const t of items) {
+      const bureau = t2(t.bureau).toLowerCase();
+      const creditor = t2(t.creditorName || t.subscriberName);
+      if (!bureau) { refused.push({ creditor, acct: t2(t.accountNumber) }); continue; }
+      const remark = Array.isArray(t.Remark)
+        ? t.Remark.map((r: any) => t2(r.customRemark || r.description)).join("; ")
+        : t2(t.Remark?.customRemark || t.Remark?.description);
+      const pay = d(t.PayStatus), cond = d(t.AccountCondition), worst = d(t.WorstPayStatus);
+      const blob = [pay, cond, worst, remark].filter(Boolean).join(" | ");
+      const hit = DEROG_RE.find((re) => re.test(blob));
+      rows.push({
+        bureau, creditor, acct: t2(t.accountNumber),
+        type: t2(part.accountTypeDescription), status: d(t.OpenClosed),
+        resp: d(t.AccountDesignator), bal: Number(t.currentBalance) || 0,
+        high: Number(t.highBalance) || 0, due: Number(t.amountPastDue || t.pastDue) || 0,
+        opened: t2(t.dateOpened), closed: t2(t.dateClosed), reported: t2(t.dateReported),
+        pay, cond, worst, dispute: d(t.DisputeFlag), industry: d(t.IndustryCode), remark,
+        neg: Boolean(hit), why: hit ? (blob.match(hit) || [""])[0] : "", tl: t,
+      });
+    }
+  }
+
+  for (const a of rows) {
+    await runtimeSql(`
+insert into control_store.credit_accounts
+ (id, customer_id, pull_id, bureau, creditor, account_number, account_type, status, responsibility,
+  balance, high_balance, past_due, open_date, closed_date, reported_date, is_negative,
+  account_condition, dispute_flag, pay_status, worst_pay_status, industry, remarks, raw, created_at)
+values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(a.bureau)},
+  ${sqlText(a.creditor)}, ${sqlText(a.acct)}, ${sqlText(a.type)}, ${sqlText(a.status)}, ${sqlText(a.resp)},
+  ${a.bal}, ${a.high}, ${a.due},
+  ${a.opened ? `${sqlText(a.opened)}::date` : "null"},
+  ${a.closed ? `${sqlText(a.closed)}::date` : "null"},
+  ${a.reported ? `${sqlText(a.reported)}::date` : "null"},
+  ${a.neg}, ${sqlText(a.cond)}, ${sqlText(a.dispute)}, ${sqlText(a.pay)}, ${sqlText(a.worst)},
+  ${sqlText(a.industry)}, ${sqlText(a.remark)}, ${jsonSql(a.tl)}, now())
+on conflict (customer_id, coalesce(creditor,''), coalesce(bureau,''), coalesce(account_number,''),
+             coalesce(balance::text,''))
+do update set pull_id=excluded.pull_id, account_type=excluded.account_type, status=excluded.status,
+  responsibility=excluded.responsibility, high_balance=excluded.high_balance, past_due=excluded.past_due,
+  open_date=excluded.open_date, closed_date=excluded.closed_date, reported_date=excluded.reported_date,
+  is_negative=excluded.is_negative, account_condition=excluded.account_condition,
+  dispute_flag=excluded.dispute_flag, pay_status=excluded.pay_status,
+  worst_pay_status=excluded.worst_pay_status, industry=excluded.industry, remarks=excluded.remarks,
+  raw=excluded.raw
+`);
+  }
+
+  const negs = rows.filter((r) => r.neg);
+  for (const n of negs) {
+    await runtimeSql(`
+insert into control_store.credit_negative_items
+ (id, customer_id, pull_id, bureau, creditor, item_type, amount, status, raw, created_at)
+values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(n.bureau)},
+  ${sqlText(n.creditor)}, ${sqlText(n.why || n.pay)}, ${n.bal}, ${sqlText(n.status)}, ${jsonSql(n.tl)}, now())
+on conflict (customer_id, coalesce(creditor,''), coalesce(bureau,''), coalesce(status,''),
+             coalesce(account_id,''))
+do update set pull_id=excluded.pull_id, item_type=excluded.item_type, amount=excluded.amount,
+  raw=excluded.raw
+`);
+  }
+
+  const perBureau: Record<string, number> = {};
+  for (const r of rows) perBureau[r.bureau] = (perBureau[r.bureau] || 0) + 1;
+  const negPerBureau: Record<string, number> = {};
+  for (const r of negs) negPerBureau[r.bureau] = (negPerBureau[r.bureau] || 0) + 1;
+  return {
+    pull_id: pullId, partitions: parts.length, tradelines: rows.length,
+    per_bureau: perBureau, negatives: negs.length, negatives_per_bureau: negPerBureau,
+    refused_no_bureau: refused.length, refused,
+  };
 }
 
 async function cookieHeaderFromContext(context: any) {
