@@ -627,6 +627,8 @@ values (${sqlText(customerId)}, ${sqlText(pullId)},
           tradelines: rows.length,
         })},
         now())
+on conflict (customer_id, pull_id)
+do update set parsed=excluded.parsed, created_at=now()
 `);
 
   const perBureau: Record<string, number> = {};
