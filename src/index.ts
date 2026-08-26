@@ -594,8 +594,16 @@ do update set pull_id=excluded.pull_id, full_name=excluded.full_name, first_name
     }
   }
 
-  /* The vendor misspells it: PulblicRecordPartition. Anything looking for PublicRecordPartition
-     finds nothing and reports a clean file - which is how a bankruptcy stays invisible. */
+  /* RAW PROVIDER FIELD MAPPING, not a spelling story.
+   *
+   *   raw_payload_field_name = PulblicRecordPartition
+   *   reader_expected        = PublicRecordPartition
+   *
+   * The raw key is what SmartCredit actually sends; whether it reads odd is beside the point. A
+   * reader that only accepts the expected name finds nothing and reports a clean file, which is how
+   * a bankruptcy stays invisible. Both names are read, so the raw field maps into the normalized
+   * public-records node either way. Pause only if the raw value is PRESENT and no normalized row
+   * gets written. */
   const prRaw = merged.PulblicRecordPartition ?? merged.PublicRecordPartition;
   const prParts = Array.isArray(prRaw) ? prRaw : prRaw ? [prRaw] : [];
   let publicRecordCount = 0;
