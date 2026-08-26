@@ -1239,6 +1239,45 @@ app.post("/download", ownerGate, async (c) => {
   }
 });
 
+/* POST /type - real keystrokes, one at a time.
+ *
+ * page.fill sets the value and fires input, which is enough for a plain field and NOT enough for a
+ * typeahead: measured 2026-08-25 on the CFPB company search, fill put "TRANSUNION INTERMEDIATE" in
+ * the box and no option list ever rendered, because the Lightning combobox listens for key events.
+ * A form that needs a suggestion picked cannot be driven by fill alone. */
+app.post("/type", ownerGate, async (c) => {
+  try {
+    const { sessionId, selector, value, delay, clear } = await c.req.json();
+    const session = sessions.get(sessionId);
+    if (!session) return c.json({ error: "Session not found" }, 404);
+    await session.page.click(selector);
+    if (clear !== false) {
+      await session.page.fill(selector, "");
+    }
+    await session.page.type(selector, String(value ?? ""), { delay: Number(delay) || 90 });
+    const landed = await session.page.inputValue(selector).catch(() => null);
+    return c.json({ status: "typed", selector, landed });
+  } catch (error) {
+    console.error("[PLAYWRIGHT] Error:", error);
+    return c.json({ error: "Failed to type", details: error.message }, 500);
+  }
+});
+
+/* POST /press - a single key on the focused element (Enter, ArrowDown, Tab). */
+app.post("/press", ownerGate, async (c) => {
+  try {
+    const { sessionId, key, selector } = await c.req.json();
+    const session = sessions.get(sessionId);
+    if (!session) return c.json({ error: "Session not found" }, 404);
+    if (selector) await session.page.focus(selector);
+    await session.page.keyboard.press(String(key || "Enter"));
+    return c.json({ status: "pressed", key });
+  } catch (error) {
+    console.error("[PLAYWRIGHT] Error:", error);
+    return c.json({ error: "Failed to press", details: error.message }, 500);
+  }
+});
+
 app.post("/select", ownerGate, async (c) => {
   try {
     const { sessionId, selector, label } = await c.req.json();
