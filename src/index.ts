@@ -1015,6 +1015,127 @@ function bootSpawnWorker() {
   });
 }
 
+
+/* ---------------------------------------------------------------------------
+ * PHASE MARKS - the loader for a browser walk.
+ *
+ * Mel, 2026-08-26: "break it down like you would have a loader on a page ...
+ * so then that way, if the agent actually stalls out on any of these, it's in a
+ * loader step so it knows where it was at."
+ *
+ * The walks are long and their step numbers do not divide where a run actually
+ * stops - CFPB steps 2 through 5 only run for a brand-new account. So the rail
+ * row for each walk carries loader_phases: the MAJOR phases, each with a proof
+ * it finished and a sentence for what a stall there means.
+ *
+ * The phase list is READ FROM THAT SAME ROW. This service does not carry its own
+ * copy, because two copies drift and then the loader describes a walk nobody is
+ * running.
+ *
+ * A phase is not a log line. It is written to control_store.credit_filing_events
+ * as phase:<key>:<state>, which is exactly what GET /api/credit/walk_progress
+ * reads. One table, one shape, one reader.
+ * ------------------------------------------------------------------------- */
+
+const WALK_PHASE_ROWS: Record<string, string> = {
+  cfpb_complaint: "AGENT_BROWSER_WALK_CFPB_COMPLAINT",
+  ftc_identity_theft_report: "AGENT_BROWSER_WALK_FTC_IDENTITY_THEFT",
+};
+
+// browser sessionId -> the phase that browser session is currently inside
+const phaseState = new Map<string, any>();
+const phaseModelCache = new Map<string, any[]>();
+
+async function loadWalkPhases(walkType: string) {
+  const key = WALK_PHASE_ROWS[walkType];
+  if (!key) {
+    throw new Error(
+      "walk_type_has_no_phase_row: " + walkType + " - known: " + Object.keys(WALK_PHASE_ROWS).join(", "),
+    );
+  }
+  const cached = phaseModelCache.get(walkType);
+  if (cached) return cached;
+  if (!dbPool) throw new Error("phase_marks_require_database_url");
+  const row = await dbPool.query(
+    "select value from control_store.rail_runtime_config where key = $1 limit 1",
+    [key],
+  );
+  if (!row.rowCount) throw new Error("walk_row_absent: " + key);
+  const value = typeof row.rows[0].value === "string" ? JSON.parse(row.rows[0].value) : row.rows[0].value;
+  const phases = value && value.loader_phases && value.loader_phases.phases;
+  /* Named, never filled in with a default sequence. A loader showing invented phases is worse than
+     one showing none - it reports progress through steps the walk is not taking. */
+  if (!Array.isArray(phases) || !phases.length) throw new Error("walk_row_carries_no_loader_phases: " + key);
+  phaseModelCache.set(walkType, phases);
+  return phases;
+}
+
+async function filingSessionCustomer(filingSessionId: string) {
+  if (!dbPool) throw new Error("phase_marks_require_database_url");
+  const row = await dbPool.query(
+    "select customer_id from control_store.credit_filing_sessions where id = $1 limit 1",
+    [filingSessionId],
+  );
+  /* Refused rather than inserted anyway. A phase row pointing at a filing session that does not
+     exist is invisible to the loader and reads as a walk that never started. */
+  if (!row.rowCount) throw new Error("filing_session_not_found: " + filingSessionId);
+  return String(row.rows[0].customer_id || "");
+}
+
+async function writePhaseMark(mark: any, state: string, detail?: string) {
+  if (!dbPool) throw new Error("phase_marks_require_database_url");
+  await dbPool.query(
+    `insert into control_store.credit_filing_events
+       (session_id, customer_id, event_type, actor_role, bureau, payload, created_at)
+     values ($1, $2, $3, 'playwright_service', $4, $5::jsonb, now())`,
+    [
+      mark.filingSessionId,
+      mark.customerId,
+      "phase:" + mark.phase + ":" + state,
+      mark.bureau || "",
+      JSON.stringify({
+        phase: mark.phase,
+        state,
+        kind: mark.kind || null,
+        label: mark.label || null,
+        detail: detail || null,
+        walk_type: mark.walkType,
+        browser_session: mark.sessionId,
+      }),
+    ],
+  );
+}
+
+/* A verb that fails while a phase is open marks that phase failed.
+ *
+ * Without this the walk driver has to remember to report every failure, and the one it forgets is
+ * the one that matters - the loader would sit showing "active" forever on a phase that died. The
+ * mark is written from the response status, so it cannot disagree with what the caller saw. */
+app.use("*", async (c, next) => {
+  await next();
+  /* Read AFTER the handler, and only when it failed. Parsing the body first would consume the
+     stream every verb in this service depends on - one bookkeeping feature would take the whole
+     browser limb down with it. Nothing here runs on the success path at all. */
+  if (c.req.method !== "POST" || c.res.status < 400) return;
+  let sessionId = "";
+  try {
+    const body = await c.req.json();
+    sessionId = String((body && body.sessionId) || "");
+  } catch {
+    return;
+  }
+  if (!sessionId) return;
+  const mark = phaseState.get(sessionId);
+  if (!mark) return;
+  try {
+    await writePhaseMark(mark, "failed", c.req.path + " answered " + c.res.status);
+    phaseState.delete(sessionId);
+  } catch (error: any) {
+    // Never let a bookkeeping write change what the caller is told about their own request.
+    console.error("[PLAYWRIGHT] phase fail-mark write failed", error?.message || error);
+  }
+});
+
 // Health check
 app.get("/health", (c) => c.json({
   status: "ok",
@@ -1322,6 +1443,82 @@ app.post("/eval", ownerGate, async (c) => {
   } catch (error) {
     console.error("[PLAYWRIGHT] Error:", error);
     return c.json({ error: "Failed to evaluate", details: error.message }, 500);
+  }
+});
+
+
+/* POST /phase - advance the loader.
+ *
+ *   { sessionId, filingSessionId, walkType, phase }  enter a phase; the phase it was in is closed done
+ *   { sessionId, state: "done" }                     close the current phase (the last one has no successor)
+ *   { sessionId, state: "failed", detail }           close it as failed
+ *
+ * A phase the walk row does not carry is REFUSED with the list that exists. Recording a near match
+ * would point the next lane at the wrong channel - and on these walks the channels are an inbox, an
+ * SMS line and a phone call.
+ */
+app.post("/phase", ownerGate, async (c) => {
+  try {
+    const { sessionId, filingSessionId, walkType, phase, state, detail, bureau } = await c.req.json();
+    if (!sessionId) return c.json({ error: "sessionId required" }, 400);
+
+    if (!phase) {
+      const closing = String(state || "");
+      if (closing !== "done" && closing !== "failed") {
+        return c.json({ error: "phase required, or state done|failed to close the current one" }, 400);
+      }
+      const open = phaseState.get(sessionId);
+      if (!open) return c.json({ error: "no_phase_open_for_this_session", sessionId }, 409);
+      await writePhaseMark(open, closing, detail);
+      phaseState.delete(sessionId);
+      return c.json({ status: "phase_closed", phase: open.phase, label: open.label, state: closing });
+    }
+
+    if (!filingSessionId) return c.json({ error: "filingSessionId required to enter a phase" }, 400);
+    if (!walkType) return c.json({ error: "walkType required to enter a phase" }, 400);
+
+    const phases = await loadWalkPhases(String(walkType));
+    const known = phases.find((p: any) => String(p && p.key) === String(phase));
+    if (!known) {
+      return c.json({
+        error: "phase_not_in_the_walk",
+        phase,
+        walk_type: walkType,
+        accepted: phases.map((p: any) => p.key),
+      }, 400);
+    }
+
+    const customerId = await filingSessionCustomer(String(filingSessionId));
+
+    // The phase it was in finished when the next one began. Nothing else closes it.
+    const open = phaseState.get(sessionId);
+    if (open && open.phase !== String(phase)) await writePhaseMark(open, "done");
+
+    const mark = {
+      sessionId: String(sessionId),
+      filingSessionId: String(filingSessionId),
+      customerId,
+      walkType: String(walkType),
+      phase: String(phase),
+      label: known.label || null,
+      kind: known.kind || "acting",
+      bureau: bureau ? String(bureau) : "",
+    };
+    await writePhaseMark(mark, "entered", detail);
+    phaseState.set(String(sessionId), mark);
+
+    return c.json({
+      status: "phase_entered",
+      phase: mark.phase,
+      label: mark.label,
+      kind: mark.kind,
+      // A code wait means the form has stopped and the next value comes from outside the browser.
+      waiting_on: known.channel || null,
+      closed_previous: open && open.phase !== mark.phase ? open.phase : null,
+    });
+  } catch (error: any) {
+    console.error("[PLAYWRIGHT] Error:", error);
+    return c.json({ error: "Failed to record phase", details: error?.message || String(error) }, 500);
   }
 });
 
