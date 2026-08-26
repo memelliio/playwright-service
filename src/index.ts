@@ -566,13 +566,22 @@ do update set pull_id=excluded.pull_id, inquiry_type=excluded.inquiry_type, is_h
       const full = t2(first?.Name?.first ? [first.Name.first, first.Name.middle, first.Name.last].filter(Boolean).join(" ") : first?.name);
       const born = ([] as any[]).concat(b.Birth || []).find((row: any) => !bu || bureauOfBlock(row) === bu)
         || ([] as any[]).concat(b.Birth || [])[0];
+      /* The bureaus report what they actually hold, and here that is the YEAR ONLY - date "1970",
+         BirthDate {day:null, month:null, year:"1970"}. Casting that to ::date is a Postgres syntax
+         error, and it was being swallowed by a catch, so every identity row silently failed to
+         write while the run counted three of them. A partial birth date stays in raw where it is
+         still readable; dob only takes a real one. */
+      const bornDay = t2(born?.BirthDate?.day), bornMonth = t2(born?.BirthDate?.month), bornYear = t2(born?.BirthDate?.year);
+      const bornDate = /^\d{4}-\d{2}-\d{2}$/.test(t2(born?.date))
+        ? t2(born.date)
+        : (bornYear && bornMonth && bornDay ? `${bornYear}-${bornMonth.padStart(2, "0")}-${bornDay.padStart(2, "0")}` : "");
       identityCount++;
       await runtimeSql(`
 insert into control_store.credit_personal_info
  (id, customer_id, pull_id, bureau, full_name, first_name, last_name, dob, addresses, employers, raw, created_at)
 values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(bu)},
   ${sqlText(full)}, ${sqlText(t2(first?.Name?.first))}, ${sqlText(t2(first?.Name?.last))},
-  ${born?.date ? `${sqlText(t2(born.date))}::date` : "null"},
+  ${bornDate ? `${sqlText(bornDate)}::date` : "null"},
   ${jsonSql({ current: forBureau(b.BorrowerAddress), previous: forBureau(b.PreviousAddress) })},
   ${jsonSql(forBureau(b.Employer))},
   ${jsonSql({ names, birth: b.Birth, social: b.SocialPartition, ssn: b.SocialSecurityNumber, statement: b.CreditStatement })},
@@ -581,7 +590,7 @@ on conflict (customer_id, coalesce(bureau, ''))
 do update set pull_id=excluded.pull_id, full_name=excluded.full_name, first_name=excluded.first_name,
   last_name=excluded.last_name, dob=excluded.dob, addresses=excluded.addresses,
   employers=excluded.employers, raw=excluded.raw
-`).catch((error: any) => { console.error("[FILL] identity insert", error?.message || error); });
+`);
     }
   }
 
@@ -603,7 +612,7 @@ values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${s
   ${r.filingDate ? `${sqlText(t2(r.filingDate))}::date` : "null"},
   ${Number(r.amount) || 0}, ${sqlText(t2(r.referenceNumber))}, ${jsonSql(r)}, now())
 on conflict do nothing
-`).catch((error: any) => { console.error("[FILL] public record insert", error?.message || error); });
+`);
     }
   }
 
