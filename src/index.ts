@@ -1578,7 +1578,11 @@ app.post("/eval", ownerGate, async (c) => {
  * SMS line and a phone call.
  */
 
-/* POST /fill - decompose a pull that is ALREADY stored.
+/* POST /decompose - re-decompose a pull that is ALREADY stored.
+ *
+ * NOT /fill: that name is already the browser form-fill verb, and a second route with the same
+ * path never runs - the first registration wins and answers "Session not found" for a request that
+ * has nothing to do with a browser session.
  *
  * The raw report is saved before it is decomposed, so a fill defect does not mean the report is
  * gone - it means the report was never fully read. Re-pulling to fix a decomposition bug asks the
@@ -1588,7 +1592,7 @@ app.post("/eval", ownerGate, async (c) => {
  * So this re-runs fillPull against a stored pull_id. Same code path as a live pull; no second
  * decomposer that can drift from it.
  */
-app.post("/fill", ownerGate, async (c) => {
+app.post("/decompose", ownerGate, async (c) => {
   try {
     const { customerId, pullId } = await c.req.json();
     if (!customerId) return c.json({ error: "customerId required" }, 400);
