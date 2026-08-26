@@ -1577,6 +1577,46 @@ app.post("/eval", ownerGate, async (c) => {
  * would point the next lane at the wrong channel - and on these walks the channels are an inbox, an
  * SMS line and a phone call.
  */
+
+/* POST /fill - decompose a pull that is ALREADY stored.
+ *
+ * The raw report is saved before it is decomposed, so a fill defect does not mean the report is
+ * gone - it means the report was never fully read. Re-pulling to fix a decomposition bug asks the
+ * vendor for something we already have, and when the vendor is refusing (measured 2026-08-26:
+ * token exchange 403 "Invalid Request") it cannot be fixed at all.
+ *
+ * So this re-runs fillPull against a stored pull_id. Same code path as a live pull; no second
+ * decomposer that can drift from it.
+ */
+app.post("/fill", ownerGate, async (c) => {
+  try {
+    const { customerId, pullId } = await c.req.json();
+    if (!customerId) return c.json({ error: "customerId required" }, 400);
+    if (!dbPool) return c.json({ error: "fill requires DATABASE_URL" }, 503);
+
+    const found = pullId
+      ? await dbPool.query(
+          "select id::text as id, raw_report, pulled_at from control_store.credit_report_pulls where id::text = $1 and customer_id = $2",
+          [String(pullId), String(customerId)],
+        )
+      : await dbPool.query(
+          "select id::text as id, raw_report, pulled_at from control_store.credit_report_pulls where customer_id = $1 order by pulled_at desc limit 1",
+          [String(customerId)],
+        );
+    if (!found.rowCount) return c.json({ error: "pull_not_found", customerId, pullId: pullId || "(newest)" }, 404);
+
+    const row = found.rows[0];
+    const report = typeof row.raw_report === "string" ? JSON.parse(row.raw_report) : row.raw_report;
+    if (!report) return c.json({ error: "pull_has_no_raw_report", pull_id: row.id }, 409);
+
+    const filled = await fillPull(String(customerId), String(row.id), report);
+    return c.json({ status: "filled", pull_id: row.id, pulled_at: row.pulled_at, ...filled });
+  } catch (error: any) {
+    console.error("[PLAYWRIGHT] Error:", error);
+    return c.json({ error: "Failed to fill", details: error?.message || String(error) }, 500);
+  }
+});
+
 app.post("/phase", ownerGate, async (c) => {
   try {
     const { sessionId, filingSessionId, walkType, phase, state, detail, bureau } = await c.req.json();
