@@ -499,7 +499,17 @@ do update set pull_id=excluded.pull_id, item_type=excluded.item_type, amount=exc
   await runtimeSql(`
 insert into control_store.credit_report_parsed (customer_id, pull_id, parsed, created_at)
 values (${sqlText(customerId)}, ${sqlText(pullId)},
-        ${jsonSql({ parsed_accounts: parsedAccounts, source: "playwright_fill_pull", tradelines: rows.length })},
+        ${jsonSql({
+          /* The composer reads parsed->'accounts'. It also sorts any row whose source ends in
+             complete_v1 ahead of every other row REGARDLESS of date, so a fill that does not use
+             that suffix is invisible behind an older one. Both are required or the newest pull is
+             silently ignored - measured 2026-08-25, CORNERSTONE on TransUnion could not be matched
+             while it sat in the newest parsed row under the wrong key. */
+          source: "playwright_fill_pull_complete_v1",
+          accounts: parsedAccounts,
+          parsed_accounts: parsedAccounts,
+          tradelines: rows.length,
+        })},
         now())
 `);
 
