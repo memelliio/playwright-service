@@ -461,6 +461,48 @@ do update set pull_id=excluded.pull_id, item_type=excluded.item_type, amount=exc
 `);
   }
 
+  /* credit_report_parsed is what the letter composer matches a selection against.
+   *
+   * Filling credit_accounts and credit_negative_items is not enough. On 2026-08-25
+   * generate_credit_repair_letters refused with selected_accounts_not_matched_to_current_report
+   * for CORNERSTONE|2021-12-21|transunion - the account named on the client's own filed FTC
+   * report - because the newest credit_report_parsed row belonged to an 11-day-old pull. The
+   * composer reads THIS table, so a pull that does not write it leaves every letter composed
+   * against stale data.
+   *
+   * The flat parsed_accounts shape is one of the two the composer accepts
+   * (fromSmartcreditTradeline handles {creditor, bureau, account_number, ...} directly). */
+  const parsedAccounts = rows.map((a) => ({
+    creditor: a.creditor,
+    bureau: a.bureau,
+    account_number: a.acct,
+    account_partition_id: a.partition,
+    account_item_id: a.item_id,
+    account_type: a.type,
+    status: a.status,
+    responsibility: a.resp,
+    balance: a.bal,
+    high_balance: a.high,
+    past_due: a.due,
+    opened_on: a.opened,
+    open_date: a.opened,
+    closed_date: a.closed,
+    reported_date: a.reported,
+    pay_status: a.pay,
+    account_condition: a.cond,
+    worst_status: a.worst,
+    dispute_flag: a.dispute,
+    industry: a.industry,
+    remarks: a.remark,
+    is_negative: a.neg,
+  }));
+  await runtimeSql(`
+insert into control_store.credit_report_parsed (customer_id, pull_id, parsed, created_at)
+values (${sqlText(customerId)}, ${sqlText(pullId)},
+        ${jsonSql({ parsed_accounts: parsedAccounts, source: "playwright_fill_pull", tradelines: rows.length })},
+        now())
+`);
+
   const perBureau: Record<string, number> = {};
   for (const r of rows) perBureau[r.bureau] = (perBureau[r.bureau] || 0) + 1;
   const negPerBureau: Record<string, number> = {};
@@ -468,6 +510,7 @@ do update set pull_id=excluded.pull_id, item_type=excluded.item_type, amount=exc
   return {
     pull_id: pullId, partitions: parts.length, tradelines: rows.length,
     per_bureau: perBureau, negatives: negs.length, negatives_per_bureau: negPerBureau,
+    parsed_accounts: parsedAccounts.length,
     refused_no_bureau: refused.length, refused,
   };
 }
