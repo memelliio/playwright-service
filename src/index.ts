@@ -320,8 +320,10 @@ insert into control_store.credit_scores_detail(
   ${s.score},
   ${jsonSql(s)},
   now()
-) on conflict do nothing
-`).catch(() => {});
+) on conflict (customer_id, coalesce(bureau, ''))
+do update set pull_id=excluded.pull_id, vantage_score=excluded.vantage_score,
+  raw=excluded.raw, created_at=now()
+`);
   }
   const ex = scores.find((s) => s.bureau === "experian")?.score || null;
   const tu = scores.find((s) => s.bureau === "transunion")?.score || null;
@@ -354,7 +356,7 @@ where id::text=${sqlText(customerId)}
     "smartcredit",
     filled.refused_no_bureau ? "needs_action" : "success",
     filled.refused_no_bureau ? "fill_refused_rows" : "pull_filled",
-    `Filled ${filled.tradelines} tradelines ${JSON.stringify(filled.per_bureau)}, ${filled.negatives} negative`,
+    `Filled ${filled.tradelines} tradelines ${JSON.stringify(filled.per_bureau)}, ${filled.negatives} negative, ${filled.inquiries} inquiries, ${filled.identity_rows} identity, ${filled.public_records} public records`,
     filled
   );
 
@@ -406,15 +408,30 @@ async function fillPull(customerId: string, pullId: string, report: any) {
       const remark = Array.isArray(t.Remark)
         ? t.Remark.map((r: any) => t2(r.customRemark || r.description)).join("; ")
         : t2(t.Remark?.customRemark || t.Remark?.description);
-      const pay = d(t.PayStatus), cond = d(t.AccountCondition), worst = d(t.WorstPayStatus);
+      /* THE GRANTED TRADE IS WHERE THE NUMBERS LIVE.
+       *
+       * WorstPayStatus, amountPastDue, CreditLimit and the late counts are NOT on the tradeline -
+       * the vendor nests them under GrantedTrade. Reading them off the top level returned undefined
+       * every time, so past_due was always 0, credit_limit was never stored at all (which is why no
+       * account could ever be graded for utilization), and the late counts never landed. */
+      const gt = t.GrantedTrade || {};
+      const pay = d(t.PayStatus), cond = d(t.AccountCondition), worst = d(gt.WorstPayStatus);
       const blob = [pay, cond, worst, remark].filter(Boolean).join(" | ");
       const hit = DEROG_RE.find((re) => re.test(blob));
       rows.push({
         bureau, creditor, acct: t2(t.accountNumber),
-        type: t2(part.accountTypeDescription), status: d(t.OpenClosed),
+        type: d(gt.AccountType) || t2(part.accountTypeDescription), status: d(t.OpenClosed),
         resp: d(t.AccountDesignator), bal: Number(t.currentBalance) || 0,
-        high: Number(t.highBalance) || 0, due: Number(t.amountPastDue || t.pastDue) || 0,
+        high: Number(t.highBalance) || 0,
+        limit: Number(gt.CreditLimit) || 0,
+        due: Number(gt.amountPastDue) || 0,
+        monthly: Number(gt.monthlyPayment) || 0,
+        late30: Number(gt.late30Count) || 0,
+        late60: Number(gt.late60Count) || 0,
+        late90: Number(gt.late90Count) || 0,
         opened: t2(t.dateOpened), closed: t2(t.dateClosed), reported: t2(t.dateReported),
+        statusDate: t2(t.dateAccountStatus), verified: t2(t.dateVerified),
+        designator: d(t.AccountDesignator), verification: d(t.VerificationIndicator),
         pay, cond, worst, dispute: d(t.DisputeFlag), industry: d(t.IndustryCode), remark,
         neg: Boolean(hit), why: hit ? (blob.match(hit) || [""])[0] : "", tl: t,
       });
@@ -425,25 +442,34 @@ async function fillPull(customerId: string, pullId: string, report: any) {
     await runtimeSql(`
 insert into control_store.credit_accounts
  (id, customer_id, pull_id, bureau, creditor, account_number, account_type, status, responsibility,
-  balance, high_balance, past_due, open_date, closed_date, reported_date, is_negative,
-  account_condition, dispute_flag, pay_status, worst_pay_status, industry, remarks, raw, created_at)
+  balance, high_balance, credit_limit, past_due, open_date, closed_date, reported_date,
+  date_account_status, late30, late60, late90, is_negative,
+  account_condition, dispute_flag, pay_status, worst_pay_status, verification, account_designator,
+  industry, remarks, raw, created_at)
 values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(a.bureau)},
   ${sqlText(a.creditor)}, ${sqlText(a.acct)}, ${sqlText(a.type)}, ${sqlText(a.status)}, ${sqlText(a.resp)},
-  ${a.bal}, ${a.high}, ${a.due},
+  ${a.bal}, ${a.high}, ${a.limit}, ${a.due},
   ${a.opened ? `${sqlText(a.opened)}::date` : "null"},
   ${a.closed ? `${sqlText(a.closed)}::date` : "null"},
   ${a.reported ? `${sqlText(a.reported)}::date` : "null"},
+  ${a.statusDate ? `${sqlText(a.statusDate)}::date` : "null"},
+  ${a.late30}, ${a.late60}, ${a.late90},
   ${a.neg}, ${sqlText(a.cond)}, ${sqlText(a.dispute)}, ${sqlText(a.pay)}, ${sqlText(a.worst)},
+  ${sqlText(a.verification)}, ${sqlText(a.designator)},
   ${sqlText(a.industry)}, ${sqlText(a.remark)}, ${jsonSql(a.tl)}, now())
 on conflict (customer_id, coalesce(creditor,''), coalesce(bureau,''), coalesce(account_number,''),
              coalesce(balance::text,''))
 do update set pull_id=excluded.pull_id, account_type=excluded.account_type, status=excluded.status,
-  responsibility=excluded.responsibility, high_balance=excluded.high_balance, past_due=excluded.past_due,
+  responsibility=excluded.responsibility, high_balance=excluded.high_balance,
+  credit_limit=excluded.credit_limit, past_due=excluded.past_due,
   open_date=excluded.open_date, closed_date=excluded.closed_date, reported_date=excluded.reported_date,
+  date_account_status=excluded.date_account_status,
+  late30=excluded.late30, late60=excluded.late60, late90=excluded.late90,
   is_negative=excluded.is_negative, account_condition=excluded.account_condition,
   dispute_flag=excluded.dispute_flag, pay_status=excluded.pay_status,
-  worst_pay_status=excluded.worst_pay_status, industry=excluded.industry, remarks=excluded.remarks,
-  raw=excluded.raw
+  worst_pay_status=excluded.worst_pay_status, verification=excluded.verification,
+  account_designator=excluded.account_designator,
+  industry=excluded.industry, remarks=excluded.remarks, raw=excluded.raw
 `);
   }
 
@@ -459,6 +485,96 @@ on conflict (customer_id, coalesce(creditor,''), coalesce(bureau,''), coalesce(s
 do update set pull_id=excluded.pull_id, item_type=excluded.item_type, amount=excluded.amount,
   raw=excluded.raw
 `);
+  }
+
+  /* THE REST OF THE REPORT.
+   *
+   * Accounts and negatives were the only things this fill wrote. Inquiries, the borrower block and
+   * public records were decomposed by nothing, so every reader either found rows from an older pull
+   * or found none - and the owner had to say so more than once. The report carries them; there is
+   * no judgement call about which parts of a client's own credit file get stored. */
+  const inqParts = Array.isArray(merged.InquiryPartition) ? merged.InquiryPartition
+    : merged.InquiryPartition ? [merged.InquiryPartition] : [];
+  let inquiryCount = 0;
+  for (const part of inqParts) {
+    const items = Array.isArray(part.Inquiry) ? part.Inquiry : part.Inquiry ? [part.Inquiry] : [];
+    for (const q of items) {
+      const bureau = t2(q.bureau).toLowerCase();
+      const when = t2(q.inquiryDate);
+      if (!bureau || !when) continue;
+      inquiryCount++;
+      await runtimeSql(`
+insert into control_store.credit_inquiries
+ (id, customer_id, pull_id, bureau, inquiry_date, subscriber_name, inquiry_type, is_hard, raw, created_at)
+values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(bureau)},
+  ${sqlText(when)}::date, ${sqlText(t2(q.subscriberName))}, ${sqlText(d(q.inquiryType) || t2(q.inquiryType))},
+  true, ${jsonSql(q)}, now())
+on conflict do nothing
+`).catch((error: any) => { console.error("[FILL] inquiry insert", error?.message || error); });
+    }
+  }
+
+  /* The borrower block is one object carrying every identity fact the bureaus hold: names, birth,
+     employers, current and previous addresses, the SSN partition and any credit statement. It is
+     stored per bureau, whole, because a dispute turns on the parts nobody thought to select. */
+  const borrower = merged.Borrower;
+  const borrowers = Array.isArray(borrower) ? borrower : borrower ? [borrower] : [];
+  let identityCount = 0;
+  for (const b of borrowers) {
+    const bureaus = new Set<string>();
+    for (const name of [].concat(b.BorrowerName || [])) {
+      const bu = t2((name as any)?.bureau).toLowerCase();
+      if (bu) bureaus.add(bu);
+    }
+    if (!bureaus.size) bureaus.add("");
+    for (const bu of bureaus) {
+      const forBureau = (value: any) => {
+        const list = Array.isArray(value) ? value : value ? [value] : [];
+        const scoped = list.filter((row: any) => !bu || t2(row?.bureau).toLowerCase() === bu);
+        return scoped.length ? scoped : list;
+      };
+      const names = forBureau(b.BorrowerName);
+      const first = names[0] as any;
+      const full = t2(first?.Name?.first ? [first.Name.first, first.Name.middle, first.Name.last].filter(Boolean).join(" ") : first?.name);
+      identityCount++;
+      await runtimeSql(`
+insert into control_store.credit_personal_info
+ (id, customer_id, pull_id, bureau, full_name, first_name, last_name, dob, addresses, employers, raw, created_at)
+values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(bu)},
+  ${sqlText(full)}, ${sqlText(t2(first?.Name?.first))}, ${sqlText(t2(first?.Name?.last))},
+  ${b.Birth ? sqlText(t2(([] as any[]).concat(b.Birth)[0]?.date)) : "null"},
+  ${jsonSql({ current: forBureau(b.BorrowerAddress), previous: forBureau(b.PreviousAddress) })},
+  ${jsonSql(forBureau(b.Employer))},
+  ${jsonSql({ names, birth: b.Birth, social: b.SocialPartition, ssn: b.SocialSecurityNumber, statement: b.CreditStatement })},
+  now())
+on conflict (customer_id, coalesce(bureau, ''))
+do update set pull_id=excluded.pull_id, full_name=excluded.full_name, first_name=excluded.first_name,
+  last_name=excluded.last_name, dob=excluded.dob, addresses=excluded.addresses,
+  employers=excluded.employers, raw=excluded.raw
+`).catch((error: any) => { console.error("[FILL] identity insert", error?.message || error); });
+    }
+  }
+
+  /* The vendor misspells it: PulblicRecordPartition. Anything looking for PublicRecordPartition
+     finds nothing and reports a clean file - which is how a bankruptcy stays invisible. */
+  const prRaw = merged.PulblicRecordPartition ?? merged.PublicRecordPartition;
+  const prParts = Array.isArray(prRaw) ? prRaw : prRaw ? [prRaw] : [];
+  let publicRecordCount = 0;
+  for (const part of prParts) {
+    const items = Array.isArray(part.PublicRecord) ? part.PublicRecord : part.PublicRecord ? [part.PublicRecord] : [];
+    for (const r of items) {
+      const bureau = t2(r.bureau).toLowerCase();
+      publicRecordCount++;
+      await runtimeSql(`
+insert into control_store.credit_public_records
+ (id, customer_id, pull_id, bureau, record_type, status, filed_date, amount, reference, raw, created_at)
+values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(bureau)},
+  ${sqlText(d(r.Type) || t2(r.type))}, ${sqlText(d(r.Status) || t2(r.status))},
+  ${r.filingDate ? `${sqlText(t2(r.filingDate))}::date` : "null"},
+  ${Number(r.amount) || 0}, ${sqlText(t2(r.referenceNumber))}, ${jsonSql(r)}, now())
+on conflict do nothing
+`).catch((error: any) => { console.error("[FILL] public record insert", error?.message || error); });
+    }
   }
 
   /* credit_report_parsed is what the letter composer matches a selection against.
@@ -521,6 +637,10 @@ values (${sqlText(customerId)}, ${sqlText(pullId)},
     pull_id: pullId, partitions: parts.length, tradelines: rows.length,
     per_bureau: perBureau, negatives: negs.length, negatives_per_bureau: negPerBureau,
     parsed_accounts: parsedAccounts.length,
+    /* Reported so the receipt says what LANDED, per section. A fill that writes accounts and
+       nothing else used to report success, and the missing sections were only visible to whoever
+       went looking in the tables. */
+    inquiries: inquiryCount, identity_rows: identityCount, public_records: publicRecordCount,
     refused_no_bureau: refused.length, refused,
   };
 }
