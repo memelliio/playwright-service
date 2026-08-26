@@ -356,7 +356,7 @@ where id::text=${sqlText(customerId)}
     "smartcredit",
     filled.refused_no_bureau ? "needs_action" : "success",
     filled.refused_no_bureau ? "fill_refused_rows" : "pull_filled",
-    `Filled ${filled.tradelines} tradelines ${JSON.stringify(filled.per_bureau)}, ${filled.negatives} negative, ${filled.inquiries} inquiries, ${filled.identity_rows} identity, ${filled.public_records} public records`,
+    `Filled ${filled.tradelines} tradelines ${JSON.stringify(filled.per_bureau)}, ${filled.negatives} negative, ${filled.inquiries} inquiries, ${filled.identity_rows} identity, ${filled.public_records} public records, ${filled.scores} scores`,
     filled
   );
 
@@ -493,6 +493,26 @@ do update set pull_id=excluded.pull_id, item_type=excluded.item_type, amount=exc
    * public records were decomposed by nothing, so every reader either found rows from an older pull
    * or found none - and the owner had to say so more than once. The report carries them; there is
    * no judgement call about which parts of a client's own credit file get stored. */
+  /* Scores are decomposed HERE too, not only on the live pull path.
+   *
+   * They were written in storeSmartCreditReport, so re-decomposing a stored report never refreshed
+   * them and the scores stayed pinned to whichever pull first wrote them. Same report, same
+   * extractor, upserted onto the pull being decomposed. */
+  let scoreCount = 0;
+  for (const sc of extractScores(report).scores) {
+    scoreCount++;
+    await runtimeSql(`
+insert into control_store.credit_scores_detail(
+  id, customer_id, pull_id, bureau, vantage_score, raw, created_at
+) values(
+  gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)},
+  ${sqlText(sc.bureau)}, ${sc.score}, ${jsonSql(sc)}, now()
+) on conflict (customer_id, coalesce(bureau, ''))
+do update set pull_id=excluded.pull_id, vantage_score=excluded.vantage_score,
+  raw=excluded.raw, created_at=now()
+`);
+  }
+
   const inqParts = Array.isArray(merged.InquiryPartition) ? merged.InquiryPartition
     : merged.InquiryPartition ? [merged.InquiryPartition] : [];
   let inquiryCount = 0;
@@ -509,8 +529,10 @@ insert into control_store.credit_inquiries
 values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(bureau)},
   ${sqlText(when)}::date, ${sqlText(t2(q.subscriberName))}, ${sqlText(d(q.inquiryType) || t2(q.inquiryType))},
   true, ${jsonSql(q)}, now())
-on conflict do nothing
-`).catch((error: any) => { console.error("[FILL] inquiry insert", error?.message || error); });
+on conflict (customer_id, coalesce(subscriber_name, ''), coalesce(bureau, ''), coalesce(inquiry_date, '1900-01-01'::date))
+do update set pull_id=excluded.pull_id, inquiry_type=excluded.inquiry_type, is_hard=excluded.is_hard,
+  raw=excluded.raw, created_at=now()
+`);
     }
   }
 
@@ -521,28 +543,36 @@ on conflict do nothing
   const borrowers = Array.isArray(borrower) ? borrower : borrower ? [borrower] : [];
   let identityCount = 0;
   for (const b of borrowers) {
+    /* The bureau on a borrower block is NOT a `bureau` field. It sits at
+       Source.Bureau.abbreviation - "Equifax", "Experian", "TransUnion". Reading name.bureau
+       returned undefined for all five names, so every identity row collapsed onto a single row with
+       an empty bureau while the three real per-bureau rows stayed on an older pull. */
+    const bureauOfBlock = (row: any) =>
+      t2(row?.Source?.Bureau?.abbreviation || row?.Source?.Bureau?.description || row?.bureau).toLowerCase();
     const bureaus = new Set<string>();
     for (const name of [].concat(b.BorrowerName || [])) {
-      const bu = t2((name as any)?.bureau).toLowerCase();
+      const bu = bureauOfBlock(name);
       if (bu) bureaus.add(bu);
     }
     if (!bureaus.size) bureaus.add("");
     for (const bu of bureaus) {
       const forBureau = (value: any) => {
         const list = Array.isArray(value) ? value : value ? [value] : [];
-        const scoped = list.filter((row: any) => !bu || t2(row?.bureau).toLowerCase() === bu);
+        const scoped = list.filter((row: any) => !bu || bureauOfBlock(row) === bu);
         return scoped.length ? scoped : list;
       };
       const names = forBureau(b.BorrowerName);
       const first = names[0] as any;
       const full = t2(first?.Name?.first ? [first.Name.first, first.Name.middle, first.Name.last].filter(Boolean).join(" ") : first?.name);
+      const born = ([] as any[]).concat(b.Birth || []).find((row: any) => !bu || bureauOfBlock(row) === bu)
+        || ([] as any[]).concat(b.Birth || [])[0];
       identityCount++;
       await runtimeSql(`
 insert into control_store.credit_personal_info
  (id, customer_id, pull_id, bureau, full_name, first_name, last_name, dob, addresses, employers, raw, created_at)
 values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(bu)},
   ${sqlText(full)}, ${sqlText(t2(first?.Name?.first))}, ${sqlText(t2(first?.Name?.last))},
-  ${b.Birth ? sqlText(t2(([] as any[]).concat(b.Birth)[0]?.date)) : "null"},
+  ${born?.date ? `${sqlText(t2(born.date))}::date` : "null"},
   ${jsonSql({ current: forBureau(b.BorrowerAddress), previous: forBureau(b.PreviousAddress) })},
   ${jsonSql(forBureau(b.Employer))},
   ${jsonSql({ names, birth: b.Birth, social: b.SocialPartition, ssn: b.SocialSecurityNumber, statement: b.CreditStatement })},
@@ -643,6 +673,7 @@ do update set parsed=excluded.parsed, created_at=now()
        nothing else used to report success, and the missing sections were only visible to whoever
        went looking in the tables. */
     inquiries: inquiryCount, identity_rows: identityCount, public_records: publicRecordCount,
+    scores: scoreCount,
     refused_no_bureau: refused.length, refused,
   };
 }
