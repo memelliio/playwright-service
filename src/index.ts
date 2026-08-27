@@ -309,6 +309,17 @@ returning id
   const pullId = String(inserted?.[0]?.id || "");
   if (!pullId) throw new Error("credit_report_pulls insert returned no id - refusing to leave a pull unfilled");
   for (const s of scores) {
+  /* EVERY PULL IS A SNAPSHOT, AND THE UNIQUE KEYS NOW SAY SO.
+     The www lane replaced the natural keys on credit_accounts, credit_scores_detail,
+     credit_inquiries, credit_personal_info, credit_negative_items and credit_public_records with
+     pull-scoped ones, so a second pull can store its own view of an account instead of colliding
+     with the first. This worker still named the OLD columns in every ON CONFLICT, and Postgres
+     answered "there is no unique or exclusion constraint matching the ON CONFLICT specification" -
+     the prequal job errored 12 seconds after it was claimed and no report landed.
+     Every insert here already stamps pullId; only the targets were stale.
+     pull_id is also gone from every do-update list. Moving an older pull's row onto the newest pull
+     is what destroys the deletion evidence the $25-per-account and $10-per-inquiry success fees are
+     billed from - the previous snapshot has to still be there to compare against. */
     await runtimeSql(`
 insert into control_store.credit_scores_detail(
   id, customer_id, pull_id, bureau, vantage_score, raw, created_at
@@ -320,8 +331,8 @@ insert into control_store.credit_scores_detail(
   ${s.score},
   ${jsonSql(s)},
   now()
-) on conflict (customer_id, coalesce(bureau, ''))
-do update set pull_id=excluded.pull_id, vantage_score=excluded.vantage_score,
+) on conflict (customer_id, pull_id, coalesce(bureau, ''))
+do update set vantage_score=excluded.vantage_score,
   raw=excluded.raw, created_at=now()
 `);
   }
@@ -457,9 +468,9 @@ values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${s
   ${a.neg}, ${sqlText(a.cond)}, ${sqlText(a.dispute)}, ${sqlText(a.pay)}, ${sqlText(a.worst)},
   ${sqlText(a.verification)}, ${sqlText(a.designator)},
   ${sqlText(a.industry)}, ${sqlText(a.remark)}, ${jsonSql(a.tl)}, now())
-on conflict (customer_id, coalesce(creditor,''), coalesce(bureau,''), coalesce(account_number,''),
+on conflict (customer_id, pull_id, coalesce(creditor,''), coalesce(bureau,''), coalesce(account_number,''),
              coalesce(balance::text,''))
-do update set pull_id=excluded.pull_id, account_type=excluded.account_type, status=excluded.status,
+do update set account_type=excluded.account_type, status=excluded.status,
   responsibility=excluded.responsibility, high_balance=excluded.high_balance,
   credit_limit=excluded.credit_limit, past_due=excluded.past_due,
   open_date=excluded.open_date, closed_date=excluded.closed_date, reported_date=excluded.reported_date,
@@ -480,9 +491,9 @@ insert into control_store.credit_negative_items
  (id, customer_id, pull_id, bureau, creditor, item_type, amount, status, raw, created_at)
 values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(n.bureau)},
   ${sqlText(n.creditor)}, ${sqlText(n.why || n.pay)}, ${n.bal}, ${sqlText(n.status)}, ${jsonSql(n.tl)}, now())
-on conflict (customer_id, coalesce(creditor,''), coalesce(bureau,''), coalesce(status,''),
+on conflict (customer_id, pull_id, coalesce(creditor,''), coalesce(bureau,''), coalesce(status,''),
              coalesce(account_id,''))
-do update set pull_id=excluded.pull_id, item_type=excluded.item_type, amount=excluded.amount,
+do update set item_type=excluded.item_type, amount=excluded.amount,
   raw=excluded.raw
 `);
   }
@@ -507,8 +518,8 @@ insert into control_store.credit_scores_detail(
 ) values(
   gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)},
   ${sqlText(sc.bureau)}, ${sc.score}, ${jsonSql(sc)}, now()
-) on conflict (customer_id, coalesce(bureau, ''))
-do update set pull_id=excluded.pull_id, vantage_score=excluded.vantage_score,
+) on conflict (customer_id, pull_id, coalesce(bureau, ''))
+do update set vantage_score=excluded.vantage_score,
   raw=excluded.raw, created_at=now()
 `);
   }
@@ -529,8 +540,8 @@ insert into control_store.credit_inquiries
 values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${sqlText(bureau)},
   ${sqlText(when)}::date, ${sqlText(t2(q.subscriberName))}, ${sqlText(d(q.inquiryType) || t2(q.inquiryType))},
   true, ${jsonSql(q)}, now())
-on conflict (customer_id, coalesce(subscriber_name, ''), coalesce(bureau, ''), coalesce(inquiry_date, '1900-01-01'::date))
-do update set pull_id=excluded.pull_id, inquiry_type=excluded.inquiry_type, is_hard=excluded.is_hard,
+on conflict (customer_id, pull_id, coalesce(subscriber_name, ''), coalesce(bureau, ''), coalesce(inquiry_date, '1900-01-01'::date))
+do update set inquiry_type=excluded.inquiry_type, is_hard=excluded.is_hard,
   raw=excluded.raw, created_at=now()
 `);
     }
@@ -586,8 +597,8 @@ values (gen_random_uuid()::text, ${sqlText(customerId)}, ${sqlText(pullId)}, ${s
   ${jsonSql(forBureau(b.Employer))},
   ${jsonSql({ names, birth: b.Birth, social: b.SocialPartition, ssn: b.SocialSecurityNumber, statement: b.CreditStatement })},
   now())
-on conflict (customer_id, coalesce(bureau, ''))
-do update set pull_id=excluded.pull_id, full_name=excluded.full_name, first_name=excluded.first_name,
+on conflict (customer_id, pull_id, coalesce(bureau, ''))
+do update set full_name=excluded.full_name, first_name=excluded.first_name,
   last_name=excluded.last_name, dob=excluded.dob, addresses=excluded.addresses,
   employers=excluded.employers, raw=excluded.raw
 `);
