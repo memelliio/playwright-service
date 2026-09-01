@@ -1113,6 +1113,31 @@ async function runPlaywrightScript(handler: any, payload: any) {
           if (status !== 200) throw new Error(step.error_prefix ? `${step.error_prefix} ${status}` : `status ${status}`);
           break;
         }
+        case "read_page_json": {
+          // The three-bureau report is a JSON file the member site serves to a logged-in browser:
+          // /member/credit-report/3b/simple.htm?format=JSON. The walk is already signed in, so the
+          // cookie the page needs is the one it is holding. No OAuth code, no token exchange, no
+          // Bearer call to the API - measured 2026-09-01, the token dance is what the walk kept
+          // dying on while the file itself was sitting one navigation away.
+          const raw = String(await page.evaluate(() => document.body?.innerText || ""));
+          state[step.text_target || "last_text"] = raw;
+          if (step.landed_target) state[step.landed_target] = page.url();
+          let value: any = null;
+          try {
+            value = JSON.parse(raw);
+          } catch {
+            // Say what came back instead. A login bounce and a plan refusal are different answers
+            // and they both arrive as "not JSON" if nobody looks.
+            const title = await page.title().catch(() => "");
+            throw new Error(
+              (step.error || "three_bureau_json_not_returned") +
+                ": landed " + page.url() + " title " + JSON.stringify(title) +
+                " first " + JSON.stringify(raw.slice(0, 160).replace(/\s+/g, " "))
+            );
+          }
+          state[step.target || "report"] = value;
+          break;
+        }
         case "parse_json": {
           const sourceText = String(getPath(state, step.from || "") || "");
           try {
