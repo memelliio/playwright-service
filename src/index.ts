@@ -1362,12 +1362,48 @@ app.post("/worker/drain", ownerGate, async (c) => {
 app.post("/session", ownerGate, async (c) => {
   try {
     const { chromium } = await import("playwright");
-    const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+    // The default headless Chromium announces itself - navigator.webdriver true and a user
+    // agent containing HeadlessChrome. Measured 2026-08-31: a real SmartCredit sign-in filled
+    // and clicked correctly and auth.smartcredit.com answered with a Cloudflare security
+    // check, Ray ID a3403d4e08f6d69c, before a token could be minted. The worker path above
+    // already dressed its context; this route did not, so the two behaved differently on the
+    // same site. They match now.
+    const browser = await chromium.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-dev-shm-usage",
+      ],
+    });
     // acceptDownloads is what makes a native browser download recoverable. Without it Chromium
     // cancels the download and NOTHING reaches disk - measured 2026-08-25 on a one-time FTC
     // identity theft report: the button was clicked for real, the page emitted its analytics
     // event, and no file existed anywhere in the container. The document was unrecoverable.
-    const context = await browser.newContext({ acceptDownloads: true });
+    const context = await browser.newContext({
+      acceptDownloads: true,
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+      viewport: { width: 1440, height: 900 },
+      locale: "en-US",
+      timezoneId: "America/Los_Angeles",
+      // A proxy is read from the environment when one is set. Nothing is invented here - with
+      // no PLAYWRIGHT_PROXY_SERVER the context runs direct, exactly as it did before.
+      ...(process.env.PLAYWRIGHT_PROXY_SERVER
+        ? {
+            proxy: {
+              server: process.env.PLAYWRIGHT_PROXY_SERVER,
+              username: process.env.PLAYWRIGHT_PROXY_USERNAME,
+              password: process.env.PLAYWRIGHT_PROXY_PASSWORD,
+            },
+          }
+        : {}),
+    });
+    // navigator.webdriver is the single most checked automation tell. Remove it before the
+    // first navigation so it is already gone when the page's own scripts run.
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    });
     const page = await context.newPage();
 
     const sessionId = Math.random().toString(36).substring(7);
