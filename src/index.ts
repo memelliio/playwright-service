@@ -999,7 +999,14 @@ async function runPlaywrightScript(handler: any, payload: any) {
   const { chromium } = await import("patchright");
   // The profile is the fix. A browser with no saved session can never hold cf_clearance, so
   // every run met the challenge as a first-time stranger. See openPersistentChrome.
-  const context = await openPersistentChrome(chromium, WORKER_PROFILE);
+  /* ONE PROFILE PER CLIENT. A shared profile is a data mixing hazard, not a convenience: the
+     browser stays signed in, so a walk for a second client on the same profile skips the login
+     entirely and captures the FIRST client report under the SECOND client id. Nothing downstream
+     could tell. The profile directory is the client session, so it is keyed by client. */
+  const profileCustomer = String(payload.customer_id || "").trim();
+  if (!profileCustomer) throw new Error("missing customer_id - refusing to open a browser profile that belongs to nobody");
+  const profileDir = CHROME_PROFILE_ROOT + "/customer/" + safeKeyPart(profileCustomer);
+  const context = await openPersistentChrome(chromium, profileDir);
   const page = context.pages()[0] || await context.newPage();
   const state: any = { payload, handler, page, context };
   try {
@@ -1113,6 +1120,40 @@ async function runPlaywrightScript(handler: any, payload: any) {
           if (status !== 200) throw new Error(step.error_prefix ? `${step.error_prefix} ${status}` : `status ${status}`);
           break;
         }
+        case "smartcredit_session": {
+          /* A client profile starts cold and has to sign in; a warm one has no login form at all,
+             and a walk that fills one waits 30 seconds for an element that will never appear. So
+             read the page ONCE and act on what is there - this is not a retry, it is looking. */
+          await page.goto(step.url, { waitUntil: "domcontentloaded", timeout: Number(step.timeout_ms || 90000) });
+          await page.waitForLoadState("networkidle", { timeout: Number(step.timeout_ms || 60000) }).catch(() => {});
+          const loginField = page.locator(step.username_selector || 'input[name="loginId"]').first();
+          const formPresent = await loginField.count().then((n: number) => n > 0).catch(() => false);
+          state[step.form_target || "login_form_present"] = formPresent;
+          if (formPresent) {
+            if (!state.credentials?.username || !state.credentials?.password) {
+              throw new Error("smartcredit_session_needs_credentials: the profile is cold and no username or password is on file");
+            }
+            await loginField.fill(String(state.credentials.username), { timeout: Number(step.timeout_ms || 30000) });
+            await page.locator(step.password_selector || 'input[name="password"]').first()
+              .fill(String(state.credentials.password), { timeout: Number(step.timeout_ms || 30000) });
+            await Promise.all([
+              page.waitForLoadState("domcontentloaded", { timeout: Number(step.timeout_ms || 90000) }).catch(() => {}),
+              page.locator(step.submit_selector || 'button[name="login"]').first().click({ timeout: Number(step.timeout_ms || 30000) }),
+            ]);
+            await page.waitForURL((u: any) => !String(u).includes("auth.smartcredit.com"), { timeout: Number(step.timeout_ms || 90000) })
+              .catch(() => undefined);
+          }
+          const landed = page.url();
+          state[step.landed_target || "session_landed_on"] = landed;
+          if (!landed.includes(step.signed_in_host || "member.smartcredit.com")) {
+            const seen = await describeAuthPage(page);
+            throw new Error(
+              (step.error || "smartcredit_session_not_established") + ": landed " + landed +
+              " reason " + seen.reason + " " + JSON.stringify(String(seen.message || "").slice(0, 160))
+            );
+          }
+          break;
+        }
         case "capture_response_json": {
           // The report page is a Vue app: it fetches its data and never puts it in the DOM or in
           // storage, and the bearer it uses lives in memory only - measured 2026-09-01, localStorage
@@ -1219,7 +1260,7 @@ async function runPlaywrightScript(handler: any, payload: any) {
   } finally {
     // Closing the persistent context is what WRITES the profile back to disk. The cookies this
     // run earned - cf_clearance included - are kept for the next one.
-    await closePersistentChrome(context, WORKER_PROFILE).catch(() => {});
+    await closePersistentChrome(context, profileDir).catch(() => {});
   }
 }
 
