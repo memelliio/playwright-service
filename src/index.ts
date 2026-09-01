@@ -818,13 +818,60 @@ function getPath(source: any, dotted: string) {
     .reduce((acc: any, key: string) => (acc == null ? undefined : acc[key]), source);
 }
 
+// The limb reports itself. Measured 2026-09-01: this service had emitted ZERO analytics events
+// in its entire life, so every failed walk left no trace and the only way to learn anything was
+// to fire it again at a real account. Every step now lands on the declared carrier line
+// `browser.walk:` under runtime.unit.agent_definition.memelli.agentic.agent.
+const WALK_TRACKER =
+  process.env.ANALYTICS_TRACKER_PUBLIC_URL ||
+  "https://analytics-tracker-production.up.railway.app";
+
+async function walkEvent(verb: string, metadata: any) {
+  const event = "browser.walk:" + verb;
+  try {
+    const res = await fetch(WALK_TRACKER + "/ingest", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-event": event, "x-service": "memelli-io" },
+      body: JSON.stringify({
+        event,
+        metadata: {
+          ...metadata,
+          carrier_line: "infinity.spawn.runtime.ceo.admin.locked.browser_walk",
+          root: "runtime.unit.agent_definition.memelli.agentic.agent",
+          driver: "patchright",
+        },
+      }),
+    });
+    const body: any = await res.json().catch(() => ({}));
+    // A refused carrier is named out loud. It is NOT retried and NOT swallowed into a success -
+    // a walk must not die because its instrument is down, and a dead instrument must not look fine.
+    if (!body?.ok) console.error("[WALK] carrier refused " + event + ": " + (body?.error || res.status));
+  } catch (error: any) {
+    console.error("[WALK] carrier unreachable " + event + ": " + String(error?.message || error));
+  }
+}
+
+// Cloudflare does not answer with an error - it answers 200 with an interstitial. Read the page
+// for the interstitial itself, and carry the Ray ID, which is the only handle support will take.
+async function readChallenge(page: any) {
+  try {
+    const title = await page.title();
+    const text = String(await page.evaluate(() => document.body?.innerText || "")).slice(0, 4000);
+    const held = /just a moment|checking your browser|verify you are human|attention required/i.test(title + " " + text);
+    const ray = (text.match(/Ray ID:?\s*([a-f0-9]{12,})/i) || [])[1] || null;
+    return { held, ray_id: ray, title };
+  } catch (error: any) {
+    return { held: null, ray_id: null, read_error: String(error?.message || error) };
+  }
+}
+
 async function runPlaywrightScript(handler: any, payload: any) {
-  const { chromium } = await import("playwright");
+  const { chromium } = await import("patchright");
   const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
-  const context = await browser.newContext({
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-  });
+  // No custom userAgent. Patchright's own guidance is explicit that a hand-set user agent is a
+  // fingerprint MISMATCH, not a disguise - the string claimed Windows Chrome 138 while the
+  // process was Linux Chromium, and every layer above it still answered Linux.
+  const context = await browser.newContext({});
   const page = await context.newPage();
   const state: any = { payload, handler, page, context };
   try {
@@ -1361,13 +1408,14 @@ app.post("/worker/drain", ownerGate, async (c) => {
 // POST /session — create a new browser session
 app.post("/session", ownerGate, async (c) => {
   try {
-    const { chromium } = await import("playwright");
-    // The default headless Chromium announces itself - navigator.webdriver true and a user
-    // agent containing HeadlessChrome. Measured 2026-08-31: a real SmartCredit sign-in filled
-    // and clicked correctly and auth.smartcredit.com answered with a Cloudflare security
-    // check, Ray ID a3403d4e08f6d69c, before a token could be minted. The worker path above
-    // already dressed its context; this route did not, so the two behaved differently on the
-    // same site. They match now.
+    const { chromium } = await import("patchright");
+    // Measured 2026-08-31: a real SmartCredit sign-in filled and clicked correctly and
+    // auth.smartcredit.com answered with a Cloudflare security check, Ray ID a3403d4e08f6d69c.
+    // Dressing the user agent did not clear it, and it was never going to: the tell is the CDP
+    // command Runtime.enable, which stock Playwright issues and Cloudflare reads directly.
+    // The driver is Patchright now - it runs page scripts in isolated execution contexts and
+    // never issues Runtime.enable. Measured against 31 Cloudflare targets in 2026, stock
+    // Playwright was the WORST performer of every stealth tool tested. The IP was not the gate.
     const browser = await chromium.launch({
       headless: true,
       args: [
@@ -1382,8 +1430,7 @@ app.post("/session", ownerGate, async (c) => {
     // event, and no file existed anywhere in the container. The document was unrecoverable.
     const context = await browser.newContext({
       acceptDownloads: true,
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+      // The user agent is gone on purpose - see the note in runPlaywrightScript.
       viewport: { width: 1440, height: 900 },
       locale: "en-US",
       timezoneId: "America/Los_Angeles",
@@ -1399,11 +1446,9 @@ app.post("/session", ownerGate, async (c) => {
           }
         : {}),
     });
-    // navigator.webdriver is the single most checked automation tell. Remove it before the
-    // first navigation so it is already gone when the page's own scripts run.
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    });
+    // The hand-rolled navigator.webdriver getter is gone. Patchright removes the tell in the
+    // driver; a redefined getter is itself detectable, because its toString does not match a
+    // native accessor. Two fixes for one tell left the second one visible.
     const page = await context.newPage();
 
     const sessionId = Math.random().toString(36).substring(7);
@@ -1420,10 +1465,12 @@ app.post("/session", ownerGate, async (c) => {
       console.log("[PLAYWRIGHT] download captured:", JSON.stringify(rec));
     });
     sessions.set(sessionId, { browser, context, page, downloads });
+    await walkEvent("open", { ok: true, session_id: sessionId, proxied: Boolean(process.env.PLAYWRIGHT_PROXY_SERVER) });
 
     return c.json({ sessionId, status: "created" });
   } catch (error) {
     console.error("[PLAYWRIGHT] Error:", error);
+    await walkEvent("blocked", { ok: false, at: "session_create", reason: String(error?.message || error) });
     return c.json({ error: "Failed to create session", details: error.message }, 500);
   }
 });
@@ -1436,7 +1483,17 @@ app.post("/navigate", ownerGate, async (c) => {
     if (!session) return c.json({ error: "Session not found" }, 404);
 
     await session.page.goto(url);
-    return c.json({ status: "navigated", url });
+    const gate = await readChallenge(session.page);
+    await walkEvent(gate.held ? "gate_hold" : "step", {
+      ok: !gate.held,
+      state: gate.held ? "blocked_named" : "verified",
+      session_id: sessionId,
+      url,
+      title: gate.title,
+      ray_id: gate.ray_id,
+      reason: gate.held ? "cloudflare_interstitial_held" : undefined,
+    });
+    return c.json({ status: "navigated", url, gate });
   } catch (error) {
     console.error("[PLAYWRIGHT] Error:", error);
     return c.json({ error: "Failed to navigate", details: error.message }, 500);

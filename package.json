@@ -8,6 +8,6 @@
   "dependencies": {
     "hono": "^4.0.0",
     "pg": "^8.16.3",
-    "playwright": "^1.40.0"
+    "patchright": "^1.62.2"
   }
 }
