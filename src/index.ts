@@ -1005,7 +1005,7 @@ async function runPlaywrightScript(handler: any, payload: any) {
      could tell. The profile directory is the client session, so it is keyed by client. */
   const profileCustomer = String(payload.customer_id || "").trim();
   if (!profileCustomer) throw new Error("missing customer_id - refusing to open a browser profile that belongs to nobody");
-  const profileDir = CHROME_PROFILE_ROOT + "/customer/" + safeKeyPart(profileCustomer);
+  const profileDir = CHROME_PROFILE_ROOT + "/customer/" + profileCustomer.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 120);
   const context = await openPersistentChrome(chromium, profileDir);
   const page = context.pages()[0] || await context.newPage();
   const state: any = { payload, handler, page, context };
