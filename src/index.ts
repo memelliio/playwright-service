@@ -711,6 +711,31 @@ async function cookieHeaderFromContext(context: any) {
   return cookies.map((cookie: any) => `${cookie.name}=${cookie.value}`).join("; ");
 }
 
+// What the authorization page is actually saying. A URL alone cannot tell a wrong password from
+// an OTP prompt from a Cloudflare hold, and for weeks all three reported the same sentence.
+async function describeAuthPage(page: any) {
+  try {
+    const title = await page.title();
+    const text = String(await page.evaluate(() => document.body?.innerText || "")).replace(/\s+/g, " ").trim();
+    const ray = (text.match(/Ray ID:?\s*([a-f0-9]{12,})/i) || [])[1] || null;
+    const alert = String(
+      await page.evaluate(() => {
+        const node = document.querySelector('.alert, .error, [role="alert"], .form-error, .callout-alert');
+        return node ? (node as any).innerText || "" : "";
+      })
+    ).replace(/\s+/g, " ").trim();
+    const message = alert || text.slice(0, 300);
+    let reason = "no_authorization_code_and_page_carries_no_error";
+    if (ray || /just a moment|verify you are human|checking your browser/i.test(title + " " + text)) reason = "cloudflare_interstitial_held";
+    else if (/one[- ]time|verification code|two[- ]factor|authenticator|passcode/i.test(text)) reason = "one_time_code_required";
+    else if (/invalid|incorrect|not match|no account|locked|disabled|suspended/i.test(alert || text)) reason = "credentials_refused";
+    else if (/reactivat|expired|renew/i.test(text)) reason = "membership_needs_reactivation";
+    return { title, message, ray_id: ray, reason };
+  } catch (error: any) {
+    return { title: null, message: null, ray_id: null, reason: "auth_page_unreadable: " + String(error?.message || error) };
+  }
+}
+
 async function runSmartCreditOAuthPull(state: any, payload: any, step: any) {
   const customerId = String(state.customer_id || payload.customer_id || "");
   if (!customerId) throw new Error("missing customer_id in queued instruction payload");
@@ -739,24 +764,50 @@ async function runSmartCreditOAuthPull(state: any, payload: any, step: any) {
   ]);
 
   let code = "";
+  let reactivation = "";
   for (let hop = 0; hop < 12; hop++) {
     const current = state.page.url();
+    // Only URL PARSING belongs in this try. The reactivation throw used to sit inside it and the
+    // empty catch ate it, so a membership that needed reactivating was reported as a generic
+    // authorization failure and nobody could tell the two apart.
+    let parsedCode = "";
     try {
-      const url = new URL(current);
-      if (current.startsWith(redirect) && url.searchParams.get("code")) {
-        code = String(url.searchParams.get("code"));
-        break;
-      }
-      if (/reactivat/i.test(current)) {
-        await creditEvent(customerId, "smartcredit", "needs_action", "needs_reactivation", "SmartCredit membership needs reactivation");
-        throw new Error(`smartcredit needs reactivation: ${current}`);
-      }
-    } catch {}
+      parsedCode = String(new URL(current).searchParams.get("code") || "");
+    } catch {
+      parsedCode = "";
+    }
+    if (current.startsWith(redirect) && parsedCode) {
+      code = parsedCode;
+      break;
+    }
+    if (/reactivat/i.test(current)) {
+      reactivation = current;
+      break;
+    }
     await state.page.waitForTimeout(1000);
   }
+  if (reactivation) {
+    await creditEvent(customerId, "smartcredit", "needs_action", "needs_reactivation", "SmartCredit membership needs reactivation");
+    await walkEvent("blocked", { ok: false, state: "blocked_named", at: "oauth_authorize", customer_id: customerId, reason: "smartcredit_needs_reactivation", url: reactivation });
+    throw new Error(`smartcredit needs reactivation: ${reactivation}`);
+  }
   if (!code) {
-    await creditEvent(customerId, "smartcredit", "needs_action", "oauth_authorization_failed", "No authorization code returned");
-    throw new Error(`SmartCredit did not complete the authorization step: ${state.page.url()}`);
+    // Read what the page actually SAYS. Reporting only the URL is why this failure was
+    // indistinguishable from a Cloudflare hold, a wrong password and an OTP prompt for weeks.
+    const seen = await describeAuthPage(state.page);
+    await creditEvent(customerId, "smartcredit", "needs_action", "oauth_authorization_failed", seen.message || "No authorization code returned");
+    await walkEvent("blocked", {
+      ok: false,
+      state: "blocked_named",
+      at: "oauth_authorize",
+      customer_id: customerId,
+      reason: seen.reason,
+      url: state.page.url(),
+      title: seen.title,
+      page_says: seen.message,
+      ray_id: seen.ray_id,
+    });
+    throw new Error(`SmartCredit did not complete the authorization step [${seen.reason}]: ${seen.message || state.page.url()}`);
   }
 
   const cookieHeader = await cookieHeaderFromContext(state.context);
