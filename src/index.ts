@@ -922,7 +922,27 @@ async function runPlaywrightScript(handler: any, payload: any) {
   // No custom userAgent. Patchright's own guidance is explicit that a hand-set user agent is a
   // fingerprint MISMATCH, not a disguise - the string claimed Windows Chrome 138 while the
   // process was Linux Chromium, and every layer above it still answered Linux.
-  const context = await browser.newContext({});
+  //
+  // The viewport, locale and timezone are NOT decoration. Measured 2026-09-01, one variable at a
+  // time: the SAME OAuth authorize URL answered "Login | Smartcredit" in 3.9s through the
+  // /session context, and was held by Cloudflare through this one - Ray ID a3409ca15fea80b1 -
+  // with the same driver, the same IP and the same URL. An empty context is its own tell: a
+  // browser reporting no locale and no timezone is not a person.
+  const context = await browser.newContext({
+    acceptDownloads: true,
+    viewport: { width: 1440, height: 900 },
+    locale: "en-US",
+    timezoneId: "America/Los_Angeles",
+    ...(process.env.PLAYWRIGHT_PROXY_SERVER
+      ? {
+          proxy: {
+            server: process.env.PLAYWRIGHT_PROXY_SERVER,
+            username: process.env.PLAYWRIGHT_PROXY_USERNAME,
+            password: process.env.PLAYWRIGHT_PROXY_PASSWORD,
+          },
+        }
+      : {}),
+  });
   const page = await context.newPage();
   const state: any = { payload, handler, page, context };
   try {
