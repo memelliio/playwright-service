@@ -748,6 +748,30 @@ async function describeAuthPage(page: any) {
 // launchPersistentContext keeps a real Chrome profile on disk. Chrome locks a profile directory,
 // so the worker and the manual session get their own, and a second concurrent open on the same
 // directory is REFUSED by name rather than quietly opening a throwaway one.
+// The Railway service carries its own start command, so the Dockerfile CMD that wrapped this
+// process in xvfb-run never runs - measured 2026-09-01: PID 1 is "bun src/index.ts" and DISPLAY
+// is empty, and Chrome refused with "you launched a headed browser without having a XServer
+// running". Start the display here instead, where nothing can override it.
+let displayStarted = false;
+async function ensureDisplay() {
+  if (process.env.DISPLAY) return process.env.DISPLAY;
+  if (displayStarted) return ":99";
+  const { spawn } = await import("child_process");
+  const { existsSync } = await import("fs");
+  spawn("Xvfb", [":99", "-screen", "0", "1440x900x24", "-nolisten", "tcp"], { detached: true, stdio: "ignore" }).unref();
+  displayStarted = true;
+  for (let i = 0; i < 50; i++) {
+    if (existsSync("/tmp/.X11-unix/X99")) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!existsSync("/tmp/.X11-unix/X99")) {
+    throw new Error("xserver_did_not_start: Xvfb :99 never created its socket, so a headed Chrome cannot run");
+  }
+  process.env.DISPLAY = ":99";
+  console.log("[PLAYWRIGHT] display :99 up");
+  return ":99";
+}
+
 const CHROME_PROFILE_ROOT = process.env.CHROME_PROFILE_DIR || "/var/lib/memelli-chrome";
 const WORKER_PROFILE = CHROME_PROFILE_ROOT + "/worker";
 const SESSION_PROFILE = CHROME_PROFILE_ROOT + "/session";
@@ -757,6 +781,7 @@ async function openPersistentChrome(chromium: any, profileDir: string) {
   if (profileInUse.has(profileDir)) {
     throw new Error("chrome_profile_locked: " + profileDir + " is already open; a second browser on one profile would discard the session");
   }
+  await ensureDisplay();
   profileInUse.add(profileDir);
   try {
     return await chromium.launchPersistentContext(profileDir, {
