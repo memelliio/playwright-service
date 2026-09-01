@@ -1113,6 +1113,33 @@ async function runPlaywrightScript(handler: any, payload: any) {
           if (status !== 200) throw new Error(step.error_prefix ? `${step.error_prefix} ${status}` : `status ${status}`);
           break;
         }
+        case "capture_response_json": {
+          // The report page is a Vue app: it fetches its data and never puts it in the DOM or in
+          // storage, and the bearer it uses lives in memory only - measured 2026-09-01, localStorage
+          // held 32 keys and not one token, and a plain navigation to the endpoint answers
+          // Unauthorized. So do not re-ask for it. Catch the response the page is ALREADY given,
+          // which is exactly what a person sees on the screen.
+          const pattern = new RegExp(step.url_pattern);
+          const [captured] = await Promise.all([
+            page.waitForResponse(
+              (r: any) => pattern.test(r.url()) && r.status() === 200,
+              { timeout: Number(step.timeout_ms || 90000) }
+            ),
+            page.goto(step.url, { waitUntil: step.wait_until || "domcontentloaded", timeout: Number(step.timeout_ms || 90000) }),
+          ]);
+          const captureText = await captured.text();
+          state[step.text_target || "captured_text"] = captureText;
+          state[step.url_target || "captured_url"] = captured.url();
+          try {
+            state[step.target || "report"] = JSON.parse(captureText);
+          } catch {
+            throw new Error(
+              (step.error || "captured_response_not_json") + ": " + captured.url() +
+              " " + captureText.length + " bytes first " + JSON.stringify(captureText.slice(0, 160))
+            );
+          }
+          break;
+        }
         case "read_page_json": {
           // The three-bureau report is a JSON file the member site serves to a logged-in browser:
           // /member/credit-report/3b/simple.htm?format=JSON. The walk is already signed in, so the
