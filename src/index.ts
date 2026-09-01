@@ -1127,9 +1127,35 @@ async function runPlaywrightScript(handler: any, payload: any) {
             ),
             page.goto(step.url, { waitUntil: step.wait_until || "domcontentloaded", timeout: Number(step.timeout_ms || 90000) }),
           ]);
-          const captureText = await captured.text();
+          let captureText = await captured.text();
+          // The bearer the app used is on the REQUEST we just watched. Take it from there and ask
+          // for the tri-bureau report the same way the app would - measured 2026-09-01, the merged
+          // /v1/credit/report carries 34 trades and NO bureau on any of them, while the tri-bureau
+          // bundle carries 63 with Experian 27 and TransUnion 36. A merged view cannot be split
+          // into per-bureau homes without inventing the bureau, and that is refused.
+          if (step.then_url) {
+            const reqHeaders = await captured.request().allHeaders();
+            const authorization = reqHeaders.authorization || reqHeaders.Authorization || "";
+            if (!authorization) {
+              throw new Error("captured_request_carried_no_authorization: " + captured.url() + " - cannot ask for " + step.then_url);
+            }
+            const second = await page.request.get(step.then_url, {
+              headers: { authorization, accept: "application/json" },
+              timeout: Number(step.timeout_ms || 90000),
+            });
+            const secondText = await second.text();
+            state[step.then_status_target || "then_status"] = second.status();
+            if (second.status() !== 200) {
+              throw new Error(
+                (step.then_error || "second_request_refused") + ": " + step.then_url + " " + second.status() +
+                " " + JSON.stringify(secondText.slice(0, 200))
+              );
+            }
+            captureText = secondText;
+            state[step.url_target || "captured_url"] = step.then_url;
+          }
           state[step.text_target || "captured_text"] = captureText;
-          state[step.url_target || "captured_url"] = captured.url();
+          if (!step.then_url) state[step.url_target || "captured_url"] = captured.url();
           try {
             state[step.target || "report"] = JSON.parse(captureText);
           } catch {
