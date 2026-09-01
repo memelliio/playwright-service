@@ -753,15 +753,24 @@ async function runSmartCreditOAuthPull(state: any, payload: any, step: any) {
   const authz = step.authorize_url || "https://auth.smartcredit.com/oauth2/authorize";
   const pageUrl = `${authz}/?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirect)}&response_type=code&scope=${encodeURIComponent(step.scope || "openid offline_access")}`;
 
+  // Each hop names itself. "did not complete the authorization step" was true of the page load,
+  // the credential fill and the submit alike, and they are three different failures.
   await state.page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: Number(step.timeout_ms || 90000) });
+  const afterLoad = await describeAuthPage(state.page);
+  await walkEvent("step", { ok: afterLoad.reason !== "cloudflare_interstitial_held", at: "authorize_loaded", customer_id: customerId, title: afterLoad.title, reason: afterLoad.reason, ray_id: afterLoad.ray_id });
+
   await state.page.locator('input[name="loginId"], input#loginId, input[type="email"]').first().fill(String(state.credentials.username), { timeout: Number(step.timeout_ms || 30000) });
   await state.page.locator('input[name="password"], input#password, input[type="password"]').first().fill(String(state.credentials.password), { timeout: Number(step.timeout_ms || 30000) });
+  const afterFill = await describeAuthPage(state.page);
+  await walkEvent("step", { ok: true, at: "credentials_filled", customer_id: customerId, title: afterFill.title, reason: afterFill.reason });
 
   const submit = state.page.locator('button[type="submit"], input[type="submit"], button:has-text("Log In"), button:has-text("Login"), button:has-text("Sign In")').first();
   await Promise.all([
     state.page.waitForLoadState("domcontentloaded", { timeout: Number(step.timeout_ms || 90000) }).catch(() => {}),
     submit.click({ timeout: Number(step.timeout_ms || 30000) }),
   ]);
+  const afterSubmit = await describeAuthPage(state.page);
+  await walkEvent("step", { ok: afterSubmit.reason !== "cloudflare_interstitial_held", at: "submit_clicked", customer_id: customerId, title: afterSubmit.title, reason: afterSubmit.reason, ray_id: afterSubmit.ray_id, url: state.page.url() });
 
   let code = "";
   let reactivation = "";
