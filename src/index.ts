@@ -736,6 +736,51 @@ async function describeAuthPage(page: any) {
   }
 }
 
+// THE BROWSER KEEPS ITS SESSION NOW.
+//
+// Measured 2026-09-01: this service opened a brand new empty browser for every run and closed it
+// at the end, so nothing survived - no cookies, no history, no profile. That is why Cloudflare
+// challenged the login submit every single time. cf_clearance is the cookie Cloudflare hands you
+// AFTER you pass once; a real person sees "Just a moment" one time and never again. We threw it
+// away on every run and arrived as a stranger, forever. The one hand that ever landed a report on
+// this account is named browser_live_session_pull - a real session with a real profile.
+//
+// launchPersistentContext keeps a real Chrome profile on disk. Chrome locks a profile directory,
+// so the worker and the manual session get their own, and a second concurrent open on the same
+// directory is REFUSED by name rather than quietly opening a throwaway one.
+const CHROME_PROFILE_ROOT = process.env.CHROME_PROFILE_DIR || "/var/lib/memelli-chrome";
+const WORKER_PROFILE = CHROME_PROFILE_ROOT + "/worker";
+const SESSION_PROFILE = CHROME_PROFILE_ROOT + "/session";
+const profileInUse = new Set<string>();
+
+async function openPersistentChrome(chromium: any, profileDir: string) {
+  if (profileInUse.has(profileDir)) {
+    throw new Error("chrome_profile_locked: " + profileDir + " is already open; a second browser on one profile would discard the session");
+  }
+  profileInUse.add(profileDir);
+  try {
+    return await chromium.launchPersistentContext(profileDir, {
+      channel: "chrome",
+      headless: false,
+      viewport: null,
+      locale: "en-US",
+      timezoneId: "America/Los_Angeles",
+      acceptDownloads: true,
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      ...(process.env.PLAYWRIGHT_PROXY_SERVER
+        ? { proxy: { server: process.env.PLAYWRIGHT_PROXY_SERVER, username: process.env.PLAYWRIGHT_PROXY_USERNAME, password: process.env.PLAYWRIGHT_PROXY_PASSWORD } }
+        : {}),
+    });
+  } catch (error) {
+    profileInUse.delete(profileDir);
+    throw error;
+  }
+}
+
+async function closePersistentChrome(context: any, profileDir: string) {
+  try { await context.close(); } finally { profileInUse.delete(profileDir); }
+}
+
 async function runSmartCreditOAuthPull(state: any, payload: any, step: any) {
   const customerId = String(state.customer_id || payload.customer_id || "");
   if (!customerId) throw new Error("missing customer_id in queued instruction payload");
@@ -927,32 +972,10 @@ async function readChallenge(page: any) {
 
 async function runPlaywrightScript(handler: any, payload: any) {
   const { chromium } = await import("patchright");
-  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
-  // No custom userAgent. Patchright's own guidance is explicit that a hand-set user agent is a
-  // fingerprint MISMATCH, not a disguise - the string claimed Windows Chrome 138 while the
-  // process was Linux Chromium, and every layer above it still answered Linux.
-  //
-  // The viewport, locale and timezone are NOT decoration. Measured 2026-09-01, one variable at a
-  // time: the SAME OAuth authorize URL answered "Login | Smartcredit" in 3.9s through the
-  // /session context, and was held by Cloudflare through this one - Ray ID a3409ca15fea80b1 -
-  // with the same driver, the same IP and the same URL. An empty context is its own tell: a
-  // browser reporting no locale and no timezone is not a person.
-  const context = await browser.newContext({
-    acceptDownloads: true,
-    viewport: { width: 1440, height: 900 },
-    locale: "en-US",
-    timezoneId: "America/Los_Angeles",
-    ...(process.env.PLAYWRIGHT_PROXY_SERVER
-      ? {
-          proxy: {
-            server: process.env.PLAYWRIGHT_PROXY_SERVER,
-            username: process.env.PLAYWRIGHT_PROXY_USERNAME,
-            password: process.env.PLAYWRIGHT_PROXY_PASSWORD,
-          },
-        }
-      : {}),
-  });
-  const page = await context.newPage();
+  // The profile is the fix. A browser with no saved session can never hold cf_clearance, so
+  // every run met the challenge as a first-time stranger. See openPersistentChrome.
+  const context = await openPersistentChrome(chromium, WORKER_PROFILE);
+  const page = context.pages()[0] || await context.newPage();
   const state: any = { payload, handler, page, context };
   try {
     for (const step of handler.script || []) {
@@ -1091,8 +1114,9 @@ async function runPlaywrightScript(handler: any, payload: any) {
     }
     return state;
   } finally {
-    await context.close().catch(() => {});
-    await browser.close().catch(() => {});
+    // Closing the persistent context is what WRITES the profile back to disk. The cookies this
+    // run earned - cf_clearance included - are kept for the next one.
+    await closePersistentChrome(context, WORKER_PROFILE).catch(() => {});
   }
 }
 
@@ -1496,40 +1520,10 @@ app.post("/session", ownerGate, async (c) => {
     // The driver is Patchright now - it runs page scripts in isolated execution contexts and
     // never issues Runtime.enable. Measured against 31 Cloudflare targets in 2026, stock
     // Playwright was the WORST performer of every stealth tool tested. The IP was not the gate.
-    const browser = await chromium.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-blink-features=AutomationControlled",
-        "--disable-dev-shm-usage",
-      ],
-    });
-    // acceptDownloads is what makes a native browser download recoverable. Without it Chromium
-    // cancels the download and NOTHING reaches disk - measured 2026-08-25 on a one-time FTC
-    // identity theft report: the button was clicked for real, the page emitted its analytics
-    // event, and no file existed anywhere in the container. The document was unrecoverable.
-    const context = await browser.newContext({
-      acceptDownloads: true,
-      // The user agent is gone on purpose - see the note in runPlaywrightScript.
-      viewport: { width: 1440, height: 900 },
-      locale: "en-US",
-      timezoneId: "America/Los_Angeles",
-      // A proxy is read from the environment when one is set. Nothing is invented here - with
-      // no PLAYWRIGHT_PROXY_SERVER the context runs direct, exactly as it did before.
-      ...(process.env.PLAYWRIGHT_PROXY_SERVER
-        ? {
-            proxy: {
-              server: process.env.PLAYWRIGHT_PROXY_SERVER,
-              username: process.env.PLAYWRIGHT_PROXY_USERNAME,
-              password: process.env.PLAYWRIGHT_PROXY_PASSWORD,
-            },
-          }
-        : {}),
-    });
-    // The hand-rolled navigator.webdriver getter is gone. Patchright removes the tell in the
-    // driver; a redefined getter is itself detectable, because its toString does not match a
-    // native accessor. Two fixes for one tell left the second one visible.
-    const page = await context.newPage();
+    // The manual session keeps its own Chrome profile too, on its own directory, because
+    // Chrome locks a profile and two browsers on one would throw the session away.
+    const context = await openPersistentChrome(chromium, SESSION_PROFILE);
+    const page = context.pages()[0] || await context.newPage();
 
     const sessionId = Math.random().toString(36).substring(7);
     const downloads: any[] = [];
@@ -1544,7 +1538,7 @@ app.post("/session", ownerGate, async (c) => {
       downloads.push(rec);
       console.log("[PLAYWRIGHT] download captured:", JSON.stringify(rec));
     });
-    sessions.set(sessionId, { browser, context, page, downloads });
+    sessions.set(sessionId, { context, page, downloads, profileDir: SESSION_PROFILE });
     await walkEvent("open", { ok: true, session_id: sessionId, proxied: Boolean(process.env.PLAYWRIGHT_PROXY_SERVER) });
 
     return c.json({ sessionId, status: "created" });
@@ -1972,7 +1966,7 @@ app.delete("/session", ownerGate, async (c) => {
     const session = sessions.get(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
 
-    await session.browser.close();
+    await closePersistentChrome(session.context, session.profileDir || SESSION_PROFILE);
     sessions.delete(sessionId);
     return c.json({ status: "closed", sessionId });
   } catch (error) {
