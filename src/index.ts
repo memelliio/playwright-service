@@ -829,8 +829,8 @@ async function runSmartCreditOAuthPull(state: any, payload: any, step: any) {
   const afterLoad = await describeAuthPage(state.page);
   await walkEvent("step", { ok: afterLoad.reason !== "cloudflare_interstitial_held", at: "authorize_loaded", customer_id: customerId, title: afterLoad.title, reason: afterLoad.reason, ray_id: afterLoad.ray_id });
 
-  await state.page.locator('input[name="loginId"], input#loginId, input[type="email"]').first().fill(String(state.credentials.username), { timeout: Number(step.timeout_ms || 30000) });
-  await state.page.locator('input[name="password"], input#password, input[type="password"]').first().fill(String(state.credentials.password), { timeout: Number(step.timeout_ms || 30000) });
+  { const f = state.page.locator('input[name="loginId"], input#loginId, input[type="email"]').first(); await f.click({ timeout: Number(step.timeout_ms || 30000) }); await f.pressSequentially(String(state.credentials.username), { delay: 90 }); }
+  { const f = state.page.locator('input[name="password"], input#password, input[type="password"]').first(); await f.click({ timeout: Number(step.timeout_ms || 30000) }); await f.pressSequentially(String(state.credentials.password), { delay: 90 }); }
   const afterFill = await describeAuthPage(state.page);
   await walkEvent("step", { ok: true, at: "credentials_filled", customer_id: customerId, title: afterFill.title, reason: afterFill.reason });
 
@@ -1030,7 +1030,7 @@ async function runPlaywrightScript(handler: any, payload: any) {
           });
           break;
         case "fill":
-          await page.fill(step.selector, String(getPath(state, step.from) ?? ""));
+          { const f = page.locator(step.selector).first(); await f.click().catch(() => {}); await f.pressSequentially(String(getPath(state, step.from) ?? ""), { delay: Number(step.delay || 90) }); }
           break;
         case "click":
           await page.locator(step.selector).click();
@@ -1133,9 +1133,10 @@ async function runPlaywrightScript(handler: any, payload: any) {
             if (!state.credentials?.username || !state.credentials?.password) {
               throw new Error("smartcredit_session_needs_credentials: the profile is cold and no username or password is on file");
             }
-            await loginField.fill(String(state.credentials.username), { timeout: Number(step.timeout_ms || 30000) });
-            await page.locator(step.password_selector || 'input[name="password"]').first()
-              .fill(String(state.credentials.password), { timeout: Number(step.timeout_ms || 30000) });
+            await loginField.click({ timeout: Number(step.timeout_ms || 30000) });
+            await loginField.pressSequentially(String(state.credentials.username), { delay: 90 });
+            { const pwF = page.locator(step.password_selector || 'input[name="password"]').first();
+              await pwF.click({ timeout: Number(step.timeout_ms || 30000) }); await pwF.pressSequentially(String(state.credentials.password), { delay: 90 }); }
             await Promise.all([
               page.waitForLoadState("domcontentloaded", { timeout: Number(step.timeout_ms || 90000) }).catch(() => {}),
               page.locator(step.submit_selector || 'button[name="login"]').first().click({ timeout: Number(step.timeout_ms || 30000) }),
@@ -1758,7 +1759,9 @@ app.post("/fill", ownerGate, async (c) => {
     const session = sessions.get(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
 
-    await session.page.fill(selector, value);
+    await session.page.click(selector).catch(() => {});
+    await session.page.fill(selector, "");
+    await session.page.type(selector, String(value ?? ""), { delay: 90 });
     return c.json({ status: "filled", selector, value });
   } catch (error) {
     console.error("[PLAYWRIGHT] Error:", error);
