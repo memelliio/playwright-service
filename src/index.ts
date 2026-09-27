@@ -6,7 +6,18 @@ const app = new Hono();
 const { Client, Pool } = pg;
 
 const port = Number(process.env.PORT) || 3000;
-const sessions = new Map<string, any>();
+/* A dead walk locked the one browser profile for everyone (2026-09-27): it never called DELETE /session,
+ * so the profile stayed "in use" and every later open failed with chrome_profile_locked until the whole
+ * service was redeployed - which also restarts the browser live credit walks use. So a session now
+ * records when it was last used, and an idle one is closed (see the reaper by DELETE /session). */
+class UsedSessions extends Map<string, any> {
+  get(key: string) {
+    const session = super.get(key);
+    if (session) session.lastUsedAt = Date.now();
+    return session;
+  }
+}
+const sessions = new UsedSessions();
 const SPAWN_CHANNEL = process.env.SPAWN_WAKE_CHANNEL || "agent_lane_wake";
 const RAIL =
   process.env.MEMELLI_CONTROL_INTERNAL ||
@@ -1683,7 +1694,11 @@ app.post("/session", ownerGate, async (c) => {
       downloads.push(rec);
       console.log("[PLAYWRIGHT] download captured:", JSON.stringify(rec));
     });
-    sessions.set(sessionId, { context, page, downloads, profileDir: SESSION_PROFILE });
+    sessions.set(sessionId, { context, page, downloads, profileDir: SESSION_PROFILE, lastUsedAt: Date.now() });
+    context.on("close", () => {
+      if (sessions.get(sessionId)?.context === context) sessions.delete(sessionId);
+      profileInUse.delete(SESSION_PROFILE);
+    });
     await walkEvent("open", { ok: true, session_id: sessionId, proxied: Boolean(process.env.PLAYWRIGHT_PROXY_SERVER) });
 
     return c.json({ sessionId, status: "created" });
@@ -2121,6 +2136,31 @@ app.delete("/session", ownerGate, async (c) => {
     return c.json({ error: "Failed to close session", details: error.message }, 500);
   }
 });
+
+const SESSION_IDLE_MS = Number(process.env.PLAYWRIGHT_SESSION_IDLE_MS) || 15 * 60 * 1000;
+/* a lock is only released after two checks in a row find no session holding it, so a browser still
+ * launching (the lock is taken before the session is recorded) is never released mid-launch */
+let orphanedSince = 0;
+setInterval(async () => {
+  const now = Date.now();
+  for (const [sessionId, session] of Map.prototype.entries.call(sessions)) {
+    if (now - (session.lastUsedAt || 0) < SESSION_IDLE_MS) continue;
+    sessions.delete(sessionId);
+    try { await closePersistentChrome(session.context, session.profileDir || SESSION_PROFILE); } catch {}
+    await walkEvent("closed_idle", { ok: true, session_id: sessionId, idle_ms: now - (session.lastUsedAt || 0) });
+    log(`[PLAYWRIGHT] closed idle session ${sessionId}`);
+  }
+  const held = [...Map.prototype.values.call(sessions)].some((s) => (s.profileDir || SESSION_PROFILE) === SESSION_PROFILE);
+  if (held || !profileInUse.has(SESSION_PROFILE)) {
+    orphanedSince = 0;
+  } else if (!orphanedSince) {
+    orphanedSince = now;
+  } else {
+    profileInUse.delete(SESSION_PROFILE);
+    orphanedSince = 0;
+    log("[PLAYWRIGHT] released the session profile: two checks found no open session holding it");
+  }
+}, 60 * 1000);
 
 Bun.serve({
   hostname: "::",
