@@ -1795,18 +1795,18 @@ app.post("/screenshot-4k", ownerGate, async (c) => {
 
 // POST /fill — fill form field
 app.post("/fill", ownerGate, async (c) => {
+  let sensitive = false;
   try {
     const { sessionId, selector, value } = await c.req.json();
     const session = sessions.get(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
+    sensitive = await session.page.locator(selector).first().evaluate((el: any) => el.type === "password" || /password|secret|token/i.test(el.name || el.id || ""));
 
-    await session.page.click(selector).catch(() => {});
-    await session.page.fill(selector, "");
-    await session.page.type(selector, String(value ?? ""), { delay: 90 });
-    return c.json({ status: "filled", selector, value });
+    await session.page.fill(selector, String(value ?? ""));
+    return c.json({ status: "filled", selector, ...(sensitive ? {} : { value }) });
   } catch (error) {
-    console.error("[PLAYWRIGHT] Error:", error);
-    return c.json({ error: "Failed to fill", details: error.message }, 500);
+    console.error("[PLAYWRIGHT] Form input failed", { name: error?.name || "Error" });
+    return c.json({ error: "Failed to fill", details: error?.name || "Error" }, 500);
   }
 });
 
@@ -1903,20 +1903,22 @@ app.post("/download", ownerGate, async (c) => {
  * the box and no option list ever rendered, because the Lightning combobox listens for key events.
  * A form that needs a suggestion picked cannot be driven by fill alone. */
 app.post("/type", ownerGate, async (c) => {
+  let sensitive = false;
   try {
     const { sessionId, selector, value, delay, clear } = await c.req.json();
     const session = sessions.get(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
+    sensitive = await session.page.locator(selector).first().evaluate((el: any) => el.type === "password" || /password|secret|token/i.test(el.name || el.id || ""));
     await session.page.click(selector);
     if (clear !== false) {
       await session.page.fill(selector, "");
     }
     await session.page.type(selector, String(value ?? ""), { delay: Number(delay) || 90 });
     const landed = await session.page.inputValue(selector).catch(() => null);
-    return c.json({ status: "typed", selector, landed });
+    return c.json({ status: "typed", selector, ...(sensitive ? {} : { landed }) });
   } catch (error) {
-    console.error("[PLAYWRIGHT] Error:", error);
-    return c.json({ error: "Failed to type", details: error.message }, 500);
+    console.error("[PLAYWRIGHT] Form input failed", { name: error?.name || "Error" });
+    return c.json({ error: "Failed to type", details: error?.name || "Error" }, 500);
   }
 });
 
