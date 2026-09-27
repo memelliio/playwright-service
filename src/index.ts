@@ -1813,11 +1813,16 @@ app.post("/fill", ownerGate, async (c) => {
 // POST /click — click element
 app.post("/click", ownerGate, async (c) => {
   try {
-    const { sessionId, selector } = await c.req.json();
+    const { sessionId, selector, frameSelector, clickCount, button } = await c.req.json();
     const session = sessions.get(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
 
-    await session.page.click(selector);
+    const target = frameSelector
+      ? session.page.frameLocator(String(frameSelector)).locator(selector)
+      : session.page.locator(selector);
+    if (clickCount !== undefined && clickCount !== 1 && clickCount !== 2) return c.json({ error: "clickCount must be 1 or 2" }, 400);
+    if (button !== undefined && !["left", "right", "middle"].includes(button)) return c.json({ error: "Invalid mouse button" }, 400);
+    await target.click({ clickCount: clickCount || 1, button: button || "left" });
     return c.json({ status: "clicked", selector });
   } catch (error) {
     console.error("[PLAYWRIGHT] Error:", error);
