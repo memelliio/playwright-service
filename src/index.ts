@@ -72,7 +72,7 @@ const ownerGate = async (c, next) => {
     (body.room !== undefined || c.req.header("X-Memelli-Session") || c.req.header("X-LiveKit-Room-Token"));
   if (scopedCreate || selected?.scope) {
     try {
-      const scope = await verifiedBrowserScope(pool, c.req.header("X-Memelli-Session") || "",
+      const scope = await verifiedBrowserScope(dbPool, c.req.header("X-Memelli-Session") || "",
         c.req.header("X-LiveKit-Room-Token") || "", scopedCreate ? String(body.room || "") : selected.scope.room,
         process.env.LIVEKIT_KEYS || "");
       if (selected?.scope && !sameBrowserScope(selected.scope, scope)) return c.json({ error: "session_room_mismatch" }, 403);
