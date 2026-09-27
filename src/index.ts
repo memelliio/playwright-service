@@ -1,6 +1,8 @@
 // @ts-nocheck
 import { Hono } from "hono";
 import pg from "pg";
+import { randomUUID } from "node:crypto";
+import { verifiedBrowserScope, sameBrowserScope } from "./sessionScope";
 
 const app = new Hono();
 const { Client, Pool } = pg;
@@ -64,6 +66,21 @@ const dbPool = DATABASE_URL
 
 // Owner gate middleware
 const ownerGate = async (c, next) => {
+  const body = await c.req.json().catch(() => ({}));
+  const selected = body.sessionId ? Map.prototype.get.call(sessions, body.sessionId) : null;
+  const scopedCreate = c.req.path === "/session" && c.req.method === "POST" &&
+    (body.room !== undefined || c.req.header("X-Memelli-Session") || c.req.header("X-LiveKit-Room-Token"));
+  if (scopedCreate || selected?.scope) {
+    try {
+      const scope = await verifiedBrowserScope(pool, c.req.header("X-Memelli-Session") || "",
+        c.req.header("X-LiveKit-Room-Token") || "", scopedCreate ? String(body.room || "") : selected.scope.room,
+        process.env.LIVEKIT_KEYS || "");
+      if (selected?.scope && !sameBrowserScope(selected.scope, scope)) return c.json({ error: "session_room_mismatch" }, 403);
+      c.set("browserScope", scope);
+      await next();
+      return;
+    } catch { return c.json({ error: "verified_session_and_room_required" }, 401); }
+  }
   const authHeader = c.req.header("Authorization");
   const ownerKey = c.req.header("X-Owner-Key");
 
@@ -814,7 +831,14 @@ async function openPersistentChrome(chromium: any, profileDir: string) {
 }
 
 async function closePersistentChrome(context: any, profileDir: string) {
-  try { await context.close(); } finally { profileInUse.delete(profileDir); }
+  try { await context.close(); } finally {
+    profileInUse.delete(profileDir);
+    const prefix = CHROME_PROFILE_ROOT + "/scoped/";
+    if (profileDir.startsWith(prefix) && /^[0-9a-f-]{36}$/.test(profileDir.slice(prefix.length))) {
+      const { rm } = await import("node:fs/promises");
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  }
 }
 
 async function runSmartCreditOAuthPull(state: any, payload: any, step: any) {
@@ -1678,10 +1702,12 @@ app.post("/session", ownerGate, async (c) => {
     // Playwright was the WORST performer of every stealth tool tested. The IP was not the gate.
     // The manual session keeps its own Chrome profile too, on its own directory, because
     // Chrome locks a profile and two browsers on one would throw the session away.
-    const context = await openPersistentChrome(chromium, SESSION_PROFILE);
+    const scope = c.get("browserScope");
+    const sessionId = randomUUID();
+    const profileDir = scope ? CHROME_PROFILE_ROOT + "/scoped/" + sessionId : SESSION_PROFILE;
+    const context = await openPersistentChrome(chromium, profileDir);
     const page = context.pages()[0] || await context.newPage();
 
-    const sessionId = Math.random().toString(36).substring(7);
     const downloads: any[] = [];
     // Capture EVERY download the moment it starts. Do not wait to be asked - a one-time
     // document is gone by the time anyone thinks to ask for it.
@@ -1694,14 +1720,14 @@ app.post("/session", ownerGate, async (c) => {
       downloads.push(rec);
       console.log("[PLAYWRIGHT] download captured:", JSON.stringify(rec));
     });
-    sessions.set(sessionId, { context, page, downloads, profileDir: SESSION_PROFILE, lastUsedAt: Date.now() });
+    sessions.set(sessionId, { context, page, downloads, profileDir, scope, lastUsedAt: Date.now() });
     context.on("close", () => {
       if (sessions.get(sessionId)?.context === context) sessions.delete(sessionId);
-      profileInUse.delete(SESSION_PROFILE);
+      profileInUse.delete(profileDir);
     });
     await walkEvent("open", { ok: true, session_id: sessionId, proxied: Boolean(process.env.PLAYWRIGHT_PROXY_SERVER) });
 
-    return c.json({ sessionId, status: "created" });
+    return c.json({ sessionId, status: "created", ...(scope ? { actorId: scope.actorId, room: scope.room, isolated: true } : {}) });
   } catch (error) {
     console.error("[PLAYWRIGHT] Error:", error);
     await walkEvent("blocked", { ok: false, at: "session_create", reason: String(error?.message || error) });
@@ -2114,7 +2140,7 @@ app.post("/screencast", ownerGate, async (c) => {
     if (!session) return c.json({ error: "Session not found" }, 404);
 
     // Screencast would require video codec setup; placeholder for now
-    return c.json({ status: "screencast-started", sessionId });
+    return c.json({ error: "screencast_not_connected", sessionId }, 501);
   } catch (error) {
     console.error("[PLAYWRIGHT] Error:", error);
     return c.json({ error: "Failed to start screencast", details: error.message }, 500);
