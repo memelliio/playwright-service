@@ -1971,10 +1971,16 @@ app.post("/select", ownerGate, async (c) => {
 // which is how a cleared required field went unnoticed.
 app.post("/eval", ownerGate, async (c) => {
   try {
-    const { sessionId, expression } = await c.req.json();
+    const { sessionId, expression, frameSelector } = await c.req.json();
     const session = sessions.get(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
-    const result = await session.page.evaluate((src) => {
+    let target = session.page;
+    if (frameSelector) {
+      const element = await session.page.$(String(frameSelector));
+      target = element ? await element.contentFrame() : null;
+      if (!target) return c.json({ error: "Frame not found in this session" }, 404);
+    }
+    const result = await target.evaluate((src) => {
       return Function('"use strict";return (' + src + ")")();
     }, expression);
     return c.json({ status: "evaluated", result });
