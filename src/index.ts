@@ -819,7 +819,8 @@ async function openPersistentChrome(chromium: any, profileDir: string) {
       locale: "en-US",
       timezoneId: "America/Los_Angeles",
       acceptDownloads: true,
-      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      // Software WebGL (SwiftShader): the box has no GPU, and the wall's 3D orb fell back to its flat picture ("webgl_context_unavailable"). Mel 2026-09-28.
+      args: ["--no-sandbox", "--disable-dev-shm-usage", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"],
       ...(process.env.PLAYWRIGHT_PROXY_SERVER
         ? { proxy: { server: process.env.PLAYWRIGHT_PROXY_SERVER, username: process.env.PLAYWRIGHT_PROXY_USERNAME, password: process.env.PLAYWRIGHT_PROXY_PASSWORD } }
         : {}),
