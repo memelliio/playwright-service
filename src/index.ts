@@ -1739,10 +1739,12 @@ app.post("/session", ownerGate, async (c) => {
 // POST /navigate — navigate to URL
 app.post("/navigate", ownerGate, async (c) => {
   try {
-    const { sessionId, url } = await c.req.json();
+    const { sessionId, url, initScript } = await c.req.json();
     const session = sessions.get(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
 
+    /* a script that runs before the page's own code (addInitScript) - e.g. a stepped clock for frame-by-frame rendering of the wall, where real time is useless on a box without a GPU. Mel 2026-09-28. */
+    if (typeof initScript === "string" && initScript) await session.page.addInitScript(initScript);
     await session.page.goto(url);
     const gate = await readChallenge(session.page);
     await walkEvent(gate.held ? "gate_hold" : "step", {
