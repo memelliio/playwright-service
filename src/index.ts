@@ -822,7 +822,7 @@ async function openPersistentChrome(chromium: any, profileDir: string) {
       // Software WebGL (SwiftShader) only when PLAYWRIGHT_SOFTWARE_WEBGL=1: it draws the 3D wall/orb (for recording it) but software 3D on every page starves other work - a 4K Terminal export went from 6 s to ~40 min. Mel 2026-09-28.
       args: ["--no-sandbox", "--disable-dev-shm-usage", ...(process.env.PLAYWRIGHT_SOFTWARE_WEBGL === "1" ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] : [])],
       ...(process.env.PLAYWRIGHT_PROXY_SERVER
-        ? { proxy: { server: process.env.PLAYWRIGHT_PROXY_SERVER, username: process.env.PLAYWRIGHT_PROXY_USERNAME, password: process.env.PLAYWRIGHT_PROXY_PASSWORD } }
+        ? { proxy: { server: process.env.PLAYWRIGHT_PROXY_SERVER, username: process.env.PLAYWRIGHT_PROXY_USERNAME, password: process.env.PLAYWRIGHT_PROXY_PASSWORD, ...(process.env.PLAYWRIGHT_PROXY_BYPASS ? { bypass: process.env.PLAYWRIGHT_PROXY_BYPASS } : {}) } }
         : {}),
     });
   } catch (error) {
