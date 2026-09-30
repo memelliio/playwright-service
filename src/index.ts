@@ -2222,10 +2222,27 @@ setInterval(async () => {
   }
 }, 60 * 1000);
 
+/* THE CEOADMIN DOOR (Mel, 2026-09-30, CEO ADMIN INIFINITY LOCK #1519: "EVERY LAST ONE"). Any address carrying /CEOADMIN/
+ * goes, whole, to the one door on DYNAMIC SPAWN ANALYTICS SERVICE over the private network; the door checks the lock
+ * against A=[0*1]=B (0 = MEMELLI IO INC, 1 = Mel). This service never checks or holds a lock itself. */
+const CEO_DOOR = "http://" + ["dynamicspawnanalyticsservice", "railway", "internal"].join(".") + ":80";
+async function ceoAdminDoor(req: Request, url: URL) {
+  try {
+    const h = new Headers(req.headers); h.delete("host"); h.set("x-memelli-from", "iNFINITY PLAYWRIGHT AND CREDIT SPINE SERVICE");
+    const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
+    return await fetch(CEO_DOOR + url.pathname + url.search, { method: req.method, headers: h, body, redirect: "manual" });
+  } catch {
+    return Response.json({ ok: false, error: "the door did not answer" }, { status: 502 });
+  }
+}
+
 Bun.serve({
   hostname: "::",
   port,
-  fetch: app.fetch,
+  fetch: (req: Request, srv: any) => {
+    const url = new URL(req.url);
+    return url.pathname.toUpperCase().includes("/CEOADMIN/") ? ceoAdminDoor(req, url) : app.fetch(req, srv);
+  },
 });
 
 log(`Listening on port ${port}`);
