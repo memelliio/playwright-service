@@ -829,9 +829,10 @@ async function openPersistentChrome(chromium: any, profileDir: string) {
   if (profileInUse.has(profileDir)) {
     throw new Error("chrome_profile_locked: " + profileDir + " is already open; a second browser on one profile would discard the session");
   }
-  await ensureDisplay();
+  // claimed before any await: two callers at the same instant could both pass the check above, then open one folder twice
   profileInUse.add(profileDir);
   try {
+    await ensureDisplay();
     await clearForeignChromeLock(profileDir);
     return await chromium.launchPersistentContext(profileDir, {
       channel: "chrome",
