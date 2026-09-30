@@ -1720,7 +1720,10 @@ app.post("/session", ownerGate, async (c) => {
     // Chrome locks a profile and two browsers on one would throw the session away.
     const scope = c.get("browserScope");
     const sessionId = randomUUID();
-    const profileDir = scope ? CHROME_PROFILE_ROOT + "/scoped/" + sessionId : SESSION_PROFILE;
+    /* A door job (a FreeCut render, the voice scorer) asks for ephemeral: its own throwaway profile, deleted on close
+     * (closePersistentChrome), so it never holds the shared profile that the credit walks use. Owner-gated like the rest. */
+    const ephemeral = !scope && (await c.req.json().catch(() => ({})))?.ephemeral === true;
+    const profileDir = scope || ephemeral ? CHROME_PROFILE_ROOT + "/scoped/" + sessionId : SESSION_PROFILE;
     const context = await openPersistentChrome(chromium, profileDir);
     const page = context.pages()[0] || await context.newPage();
 
