@@ -805,6 +805,20 @@ const WORKER_PROFILE = CHROME_PROFILE_ROOT + "/worker";
 const SESSION_PROFILE = CHROME_PROFILE_ROOT + "/session";
 const profileInUse = new Set<string>();
 
+// A redeploy lands on a new host, but the profile volume keeps Chrome's SingletonLock, a link to
+// "<old host>-<pid>". Chrome then refuses the profile as "in use by another computer" and every launch
+// hung 180 s - measured 2026-09-30 after the key-rotation redeploy, which blocked every walk for 44 min.
+// This process is the only Chrome on the volume (profileInUse guards it), so a lock naming another
+// host is always stale. A lock naming this host is left to Chrome, which checks the pid itself.
+async function clearForeignChromeLock(profileDir: string) {
+  const { readlink, rm } = await import("node:fs/promises");
+  const { hostname } = await import("node:os");
+  const target = await readlink(profileDir + "/SingletonLock").catch(() => "");
+  if (!target || target.startsWith(hostname() + "-")) return;
+  for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) await rm(profileDir + "/" + name, { force: true });
+  console.log("[PLAYWRIGHT] removed a stale Chrome profile lock left by host " + target.split("-")[0]);
+}
+
 async function openPersistentChrome(chromium: any, profileDir: string) {
   if (profileInUse.has(profileDir)) {
     throw new Error("chrome_profile_locked: " + profileDir + " is already open; a second browser on one profile would discard the session");
@@ -812,6 +826,7 @@ async function openPersistentChrome(chromium: any, profileDir: string) {
   await ensureDisplay();
   profileInUse.add(profileDir);
   try {
+    await clearForeignChromeLock(profileDir);
     return await chromium.launchPersistentContext(profileDir, {
       channel: "chrome",
       headless: false,
