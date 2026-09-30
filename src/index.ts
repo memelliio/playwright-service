@@ -85,7 +85,7 @@ const ownerGate = async (c, next) => {
   const ownerKey = c.req.header("X-Owner-Key");
 
   if (ownerKey !== "1604" && !authHeader?.includes("1604")) {
-    return c.json({ error: "Unauthorized: owner_key 1604 required" }, 401);
+    return c.json({ error: "Unauthorized: owner key required" }, 401);
   }
 
   await next();
