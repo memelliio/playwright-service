@@ -58,7 +58,7 @@ const dbPool = DATABASE_URL
   ? new Pool({
       connectionString: databaseUrlWithAppName(DATABASE_URL),
       application_name: DB_APPLICATION_NAME,
-      max: Number(process.env.PG_POOL_MAX || 2),
+      max: Number(process.env.PG_POOL_MAX || 10),
       connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS || 8000),
       idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 30000),
     } as any)
@@ -1421,36 +1421,59 @@ async function executeWork(work: any) {
   }
 }
 
+/* SEVERAL CLIENTS AT ONCE (Mel 2026-09-30: "there should be multiple connections ... how come you guys are always talking
+ * about playwright is locked"). Every customer already has their own Chrome profile (runPlaywrightScript), so jobs for
+ * different customers run side by side, up to SPAWN_WORKER_CONCURRENCY (default 3). Two jobs for ONE customer never share a
+ * profile: the second goes back to pending and is picked up when the first ends. */
+const WORKER_CONCURRENCY = Math.max(1, Number(process.env.SPAWN_WORKER_CONCURRENCY || 3));
+let workersRunning = 0;
+const customersRunning = new Set<string>();
+
+async function requeueWork(id: string) {
+  await runtimeSql(`update control_store.spawn_work set status='pending', claimed_at=null, updated_at=now(), attempt_count=greatest(coalesce(attempt_count,1)-1,0) where id=${sqlText(id)} and status='running'`);
+}
+
+async function runClaimedWork(work: any) {
+  const startedAt = Date.now();
+  try {
+    await recordSpawnAnalytics(work, "claimed", { status: "running" });
+    const result = await executeWork(work);
+    await recordSpawnAnalytics(work, "completed", { status: "done", elapsed_ms: Date.now() - startedAt });
+    await finishWork(work.id, "done", { ok: true, worker: WORKER_NAME, ...result }, `done:${work.id}`);
+    log("done", work.id);
+  } catch (error: any) {
+    const errorText = String(error?.message || error);
+    try {
+      await recordSpawnAnalytics(work, "failed", { status: "error", elapsed_ms: Date.now() - startedAt, error: errorText.slice(0, 500) });
+    } catch (analyticsError: any) {
+      log("analytics error", work.id, String(analyticsError?.message || analyticsError));
+    }
+    await finishWork(work.id, "error", { ok: false, worker: WORKER_NAME, error: errorText }, `error:${errorText.slice(0, 400)}`);
+    log("error", work.id, errorText);
+  }
+}
+
 async function drainOnce() {
   if (draining) return;
   draining = true;
   try {
-    while (true) {
+    while (workersRunning < WORKER_CONCURRENCY) {
       const work = await claimWork();
       if (!work) break;
-      log("claimed", work.id, work.work_class, work.lane);
-      const startedAt = Date.now();
-      try {
-        await recordSpawnAnalytics(work, "claimed", { status: "running" });
-        const result = await executeWork(work);
-        await recordSpawnAnalytics(work, "completed", { status: "done", elapsed_ms: Date.now() - startedAt });
-        await finishWork(work.id, "done", { ok: true, worker: WORKER_NAME, ...result }, `done:${work.id}`);
-        log("done", work.id);
-      } catch (error: any) {
-        const errorText = String(error?.message || error);
-        try {
-          await recordSpawnAnalytics(work, "failed", { status: "error", elapsed_ms: Date.now() - startedAt, error: errorText.slice(0, 500) });
-        } catch (analyticsError: any) {
-          log("analytics error", work.id, String(analyticsError?.message || analyticsError));
-        }
-        await finishWork(
-          work.id,
-          "error",
-          { ok: false, worker: WORKER_NAME, error: errorText },
-          `error:${errorText.slice(0, 400)}`
-        );
-        log("error", work.id, errorText);
+      const customer = String(extractJsonObject(String(work.instruction || "")).customer_id || "");
+      if (customer && customersRunning.has(customer)) {
+        await requeueWork(work.id);
+        log("requeued, customer already running", work.id);
+        break;
       }
+      if (customer) customersRunning.add(customer);
+      workersRunning++;
+      log("claimed", work.id, work.work_class, work.lane, `(${workersRunning}/${WORKER_CONCURRENCY})`);
+      void runClaimedWork(work).finally(() => {
+        workersRunning--;
+        if (customer) customersRunning.delete(customer);
+        void drainOnce().catch((error) => { lastDrainError = String(error?.message || error); });
+      });
     }
   } finally {
     draining = false;
@@ -1723,7 +1746,10 @@ app.post("/session", ownerGate, async (c) => {
     /* A door job (a FreeCut render, the voice scorer) asks for ephemeral: its own throwaway profile, deleted on close
      * (closePersistentChrome), so it never holds the shared profile that the credit walks use. Owner-gated like the rest. */
     const ephemeral = !scope && (await c.req.json().catch(() => ({})))?.ephemeral === true;
-    const profileDir = scope || ephemeral ? CHROME_PROFILE_ROOT + "/scoped/" + sessionId : SESSION_PROFILE;
+    /* The shared profile is one caller's at a time. When it is already open, the next caller gets its own profile (deleted on
+     * close) instead of chrome_profile_locked - Mel 2026-09-30: "there should be multiple connections". The answer says so. */
+    const sharedBusy = !scope && !ephemeral && profileInUse.has(SESSION_PROFILE);
+    const profileDir = scope || ephemeral || sharedBusy ? CHROME_PROFILE_ROOT + "/scoped/" + sessionId : SESSION_PROFILE;
     const context = await openPersistentChrome(chromium, profileDir);
     const page = context.pages()[0] || await context.newPage();
 
@@ -1746,7 +1772,7 @@ app.post("/session", ownerGate, async (c) => {
     });
     await walkEvent("open", { ok: true, session_id: sessionId, proxied: Boolean(process.env.PLAYWRIGHT_PROXY_SERVER) });
 
-    return c.json({ sessionId, status: "created", ...(scope ? { actorId: scope.actorId, room: scope.room, isolated: true } : {}) });
+    return c.json({ sessionId, status: "created", ...(sharedBusy ? { shared_profile_busy: true, profile: "own" } : {}), ...(scope ? { actorId: scope.actorId, room: scope.room, isolated: true } : {}) });
   } catch (error) {
     console.error("[PLAYWRIGHT] Error:", error);
     await walkEvent("blocked", { ok: false, at: "session_create", reason: String(error?.message || error) });
