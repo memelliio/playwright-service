@@ -780,24 +780,30 @@ async function describeAuthPage(page: any) {
 // process in xvfb-run never runs - measured 2026-09-01: PID 1 is "bun src/index.ts" and DISPLAY
 // is empty, and Chrome refused with "you launched a headed browser without having a XServer
 // running". Start the display here instead, where nothing can override it.
-let displayStarted = false;
+/* ONE WAIT FOR EVERYONE. Several browsers now open at once (Mel 2026-09-30: "there should be multiple connections"), and
+ * the old flag told every caller after the first that ":99" was ready before Xvfb had made its socket - their Chrome found
+ * no display and exited ("Missing X server or $DISPLAY", measured 2026-09-30 21:13 UTC). Every caller now awaits the same start. */
+let displayReady: Promise<string> | null = null;
 async function ensureDisplay() {
   if (process.env.DISPLAY) return process.env.DISPLAY;
-  if (displayStarted) return ":99";
-  const { spawn } = await import("child_process");
-  const { existsSync } = await import("fs");
-  spawn("Xvfb", [":99", "-screen", "0", "1440x900x24", "-nolisten", "tcp"], { detached: true, stdio: "ignore" }).unref();
-  displayStarted = true;
-  for (let i = 0; i < 50; i++) {
-    if (existsSync("/tmp/.X11-unix/X99")) break;
-    await new Promise((r) => setTimeout(r, 100));
+  if (!displayReady) {
+    displayReady = (async () => {
+      const { spawn } = await import("child_process");
+      const { existsSync } = await import("fs");
+      if (!existsSync("/tmp/.X11-unix/X99")) spawn("Xvfb", [":99", "-screen", "0", "1440x900x24", "-nolisten", "tcp"], { detached: true, stdio: "ignore" }).unref();
+      for (let i = 0; i < 50; i++) {
+        if (existsSync("/tmp/.X11-unix/X99")) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (!existsSync("/tmp/.X11-unix/X99")) {
+        throw new Error("xserver_did_not_start: Xvfb :99 never created its socket, so a headed Chrome cannot run");
+      }
+      process.env.DISPLAY = ":99";
+      console.log("[PLAYWRIGHT] display :99 up");
+      return ":99";
+    })().catch((error) => { displayReady = null; throw error; });
   }
-  if (!existsSync("/tmp/.X11-unix/X99")) {
-    throw new Error("xserver_did_not_start: Xvfb :99 never created its socket, so a headed Chrome cannot run");
-  }
-  process.env.DISPLAY = ":99";
-  console.log("[PLAYWRIGHT] display :99 up");
-  return ":99";
+  return displayReady;
 }
 
 const CHROME_PROFILE_ROOT = process.env.CHROME_PROFILE_DIR || "/var/lib/memelli-chrome";
