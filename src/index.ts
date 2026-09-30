@@ -1748,9 +1748,18 @@ app.post("/session", ownerGate, async (c) => {
     const ephemeral = !scope && (await c.req.json().catch(() => ({})))?.ephemeral === true;
     /* The shared profile is one caller's at a time. When it is already open, the next caller gets its own profile (deleted on
      * close) instead of chrome_profile_locked - Mel 2026-09-30: "there should be multiple connections". The answer says so. */
-    const sharedBusy = !scope && !ephemeral && profileInUse.has(SESSION_PROFILE);
-    const profileDir = scope || ephemeral || sharedBusy ? CHROME_PROFILE_ROOT + "/scoped/" + sessionId : SESSION_PROFILE;
-    const context = await openPersistentChrome(chromium, profileDir);
+    let sharedBusy = !scope && !ephemeral && profileInUse.has(SESSION_PROFILE);
+    let profileDir = scope || ephemeral || sharedBusy ? CHROME_PROFILE_ROOT + "/scoped/" + sessionId : SESSION_PROFILE;
+    let context: any;
+    try {
+      context = await openPersistentChrome(chromium, profileDir);
+    } catch (error: any) {
+      // two callers at the same instant both saw the shared profile free; the one that lost the race gets its own
+      if (profileDir !== SESSION_PROFILE || !String(error?.message || error).startsWith("chrome_profile_locked")) throw error;
+      sharedBusy = true;
+      profileDir = CHROME_PROFILE_ROOT + "/scoped/" + sessionId;
+      context = await openPersistentChrome(chromium, profileDir);
+    }
     const page = context.pages()[0] || await context.newPage();
 
     const downloads: any[] = [];
