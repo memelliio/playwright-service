@@ -2286,7 +2286,7 @@ app.post("/mixer/signout", async (c) => {
   try { const rc = process.env.REDIS_URL ? new (Bun as any).RedisClient(process.env.REDIS_URL) : null; const v = rc ? await rc.get("key:A=B") : null; lock = v ? JSON.parse(v) : null; } catch {}
   const person = String(lock?.person_id || "");
   if (!person || lock?.key !== "A=[0*1]=B") return c.json({ ok: false, error: "the lock key:A=B is not live" }, 503);
-  const rows = (await dbPool.query("select s.id::text as id, s.token, s.user_id::text as uid, lower(coalesce(u.email, '')) as email, coalesce(u.role, 'admin') as role from control_store.app_sessions s left join control_store.users u on u.id::text = s.user_id::text where s.user_id::text = $1 and s.revoked_at is null and s.expires_at > now()", [person])).rows;
+  const rows = (await dbPool.query("select s.id::text as id, s.token, s.user_id::text as uid, lower(coalesce(u.email, '')) as email, coalesce(u.role, 'admin') as role from control_store.app_sessions s left join control_store.users u on u.id::text = s.user_id::text where s.user_id::text = $1 and s.revoked_at is null and s.expires_at > now() and coalesce(s.user_agent, '') !~* '(iphone|ipad|android|mobile)'", [person])).rows; /* the phone stays: it attaches to the stamp, not to a web session (Mel 2026-10-01) */
   if (dry) return c.json({ ok: true, dry: true, would_end: rows.length, ms: Date.now() - t });
   mixerSignoutAt = Date.now();
   let ended = 0; const errors: string[] = [];
