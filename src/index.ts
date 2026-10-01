@@ -2264,6 +2264,50 @@ setInterval(async () => {
   }
 }, 60 * 1000);
 
+/* THE MIXER'S SIGN OUT - PRIVATE, HERE (Mel, 2026-10-01: "Sign out ... lives next to the power button in my name" · "Playwright
+ * is the live actor ... the whole network is not supposed to reach out to www ... It's a private network"). The mixer's own
+ * server (the GPU container's nginx, location = /signout) hands the press here over the private network, marked
+ * X-Memelli-From: Memelli Infinity Dynamic GPU. This ends the live web sessions of the person the master variable names
+ * (A=[0*1]=B, its person) - each by its token, on the same guarded revoke the site's own logout uses (the envelope names the
+ * session it closes) - drops each one's cached whoami in Redis, and writes a bash:out on the logo line. ?dry=1 only counts.
+ * It can only end a session, never open one. */
+let mixerSignoutAt = 0;
+app.post("/mixer/signout", async (c) => {
+  if (c.req.header("X-Memelli-From") !== "Memelli Infinity Dynamic GPU") return c.json({ ok: false, error: "only the mixer" }, 403);
+  if (!dbPool) return c.json({ ok: false, error: "no database here" }, 503);
+  const dry = new URL(c.req.url).searchParams.get("dry") === "1";
+  if (!dry && Date.now() - mixerSignoutAt < 15000) return c.json({ ok: false, error: "signed out a moment ago" }, 429);
+  const t = Date.now();
+  /* ONLY THE LOCK (Mel, 2026-10-01: "even if you were going to playwright ... it would still only be my lock" · "the keys read
+   * the same star format ... one of them is the lock in and lock out"). The person is never taken from the request: it is the
+   * one the live stamp key:A=B names (read in its star form from the master variable, A=[0*1]=B). The press goes IN on lock A
+   * and its result comes back OUT on lock B. No live stamp, no sign out. Nothing is decrypted - only the stars are read. */
+  let lock: any = null;
+  try { const rc = process.env.REDIS_URL ? new (Bun as any).RedisClient(process.env.REDIS_URL) : null; const v = rc ? await rc.get("key:A=B") : null; lock = v ? JSON.parse(v) : null; } catch {}
+  const person = String(lock?.person_id || "");
+  if (!person || lock?.key !== "A=[0*1]=B") return c.json({ ok: false, error: "the lock key:A=B is not live" }, 503);
+  const rows = (await dbPool.query("select s.id::text as id, s.token, s.user_id::text as uid, lower(coalesce(u.email, '')) as email, coalesce(u.role, 'admin') as role from control_store.app_sessions s left join control_store.users u on u.id::text = s.user_id::text where s.user_id::text = $1 and s.revoked_at is null and s.expires_at > now()", [person])).rows;
+  if (dry) return c.json({ ok: true, dry: true, would_end: rows.length, ms: Date.now() - t });
+  mixerSignoutAt = Date.now();
+  let ended = 0; const errors: string[] = [];
+  let redis: any = null; try { redis = process.env.REDIS_URL ? new (Bun as any).RedisClient(process.env.REDIS_URL) : null; } catch {}
+  for (const r of rows) {
+    const env = JSON.stringify({ entrypoint: "bar", target_key: "auth.session.revoke", operation: "revoke", classification: "session_logout", consumer_status: "active_consumed", source_proof: "the owner pressed Sign out on the mixer; Playwright revoked through the guarded connection", rollback_target: "control_store.app_sessions:" + r.id, issued_by: r.email, issuer_role: r.role, actor_id: r.uid, session_id: r.id });
+    const cl = await dbPool.connect();
+    try {
+      await cl.query("begin");
+      await cl.query("select set_config('infinity.bar_envelope', $1, true)", [env]);
+      const u = await cl.query("update control_store.app_sessions set revoked_at = now() where token = $1 and revoked_at is null", [r.token]);
+      await cl.query("commit");
+      ended += u.rowCount || 0;
+      try { if (redis) await redis.del("whoami:key:" + new (Bun as any).CryptoHasher("sha256").update(String(r.token)).digest("hex").slice(0, 40)); } catch {}
+    } catch (e: any) { try { await cl.query("rollback"); } catch {} errors.push(String(e?.message || e).slice(0, 120)); }
+    finally { cl.release(); }
+  }
+  try { await dbPool.query("insert into control_store.analytics_events (id, event_name, event_category, session_id, page_path, properties, created_at) values (gen_random_uuid()::text, 'bash:out', 'carrier', null, 'mixer/signout', $1, now())", [JSON.stringify({ control: "sign_out", ended, live_before: rows.length, errors: errors.length, carrier: "logo", source: "playwright/mixer/signout", owner: "A=[0*1]=B", lock_in: "A", lock_out: "B", lock_minted_at: String(lock?.minted_at || "") })]); } catch {}
+  return c.json({ ok: errors.length === 0, ended, live_before: rows.length, errors, lock: { in: "A", out: "B", key: "A=[0*1]=B" }, ms: Date.now() - t });
+});
+
 /* THE CEOADMIN DOOR (Mel, 2026-09-30, CEO ADMIN INIFINITY LOCK #1519: "EVERY LAST ONE"). Any address carrying /CEOADMIN/
  * goes, whole, to the one door on DYNAMIC SPAWN ANALYTICS SERVICE over the private network; the door checks the lock
  * against A=[0*1]=B (0 = MEMELLI IO INC, 1 = Mel). This service never checks or holds a lock itself. */
