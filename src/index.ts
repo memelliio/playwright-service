@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { Hono } from "hono";
 import pg from "pg";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual as timingSafeEqualBuf } from "node:crypto";
 import { verifiedBrowserScope, sameBrowserScope } from "./sessionScope";
 
 const app = new Hono();
@@ -81,6 +81,13 @@ const ownerGate = async (c, next) => {
       return;
     } catch { return c.json({ error: "verified_session_and_room_required" }, 401); }
   }
+  /* THE LOCK, NOT A TYPED NUMBER (Mel, 2026-10-01: "my master variable covers anything in the system ... find the
+   * combination"). The owner's locks A and B live in every container as shared variables; a caller that carries one in
+   * x-memelli-lock is the owner's door (A=[0*1]=B, 0 = MEMELLI IO INC, 1 = Mel). Compared in constant time. The typed
+   * "1604" below stays only until the site's walk moves onto the lock; then it goes. */
+  const lockHeader = String(c.req.header("x-memelli-lock") || "");
+  const lockOk = (want: string) => { const a = Buffer.from(lockHeader), b = Buffer.from(String(want || "")); return a.length > 0 && a.length === b.length && timingSafeEqualBuf(a, b); };
+  if (lockHeader && (lockOk(process.env.A || "") || lockOk(process.env.B || ""))) { await next(); return; }
   const authHeader = c.req.header("Authorization");
   const ownerKey = c.req.header("X-Owner-Key");
 
