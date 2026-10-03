@@ -2215,18 +2215,93 @@ app.post("/scrape", ownerGate, async (c) => {
   }
 });
 
-// POST /screencast — start screencast (video recording)
+// POST /screencast — the record button (Mel 2026-10-03: "it's just a button ... the same press as the logo").
+// { sessionId, action: "start" } starts Chrome's own screencast on the session page; { sessionId, action: "stop" }
+// ends it and encodes the frames to an MP4 with ffmpeg in this same container - no other module. The MP4 is kept
+// at RECORDINGS_DIR/<recordingId>.mp4 and returned as base64; POST /recording { recordingId } reads it again.
+const RECORDINGS_DIR = process.env.PLAYWRIGHT_RECORDINGS_DIR || "/var/lib/memelli-chrome/recordings";
+const SCREENCAST_MAX_FRAMES = Number(process.env.PLAYWRIGHT_SCREENCAST_MAX_FRAMES) || 9000;
 app.post("/screencast", ownerGate, async (c) => {
   try {
-    const { sessionId } = await c.req.json();
+    const { sessionId, action = "start", quality } = await c.req.json();
     const session = sessions.get(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
 
-    // Screencast would require video codec setup; placeholder for now
-    return c.json({ error: "screencast_not_connected", sessionId }, 501);
+    if (action === "start") {
+      if (session.screencast) return c.json({ status: "recording", sessionId, recordingId: session.screencast.id, frames: session.screencast.frames.length });
+      const cdp = await session.context.newCDPSession(session.page);
+      const rec = { id: randomUUID(), cdp, frames: [] as Array<{ data: string; t: number }>, startedAt: Date.now(), dropped: 0 };
+      cdp.on("Page.screencastFrame", async (f: any) => {
+        if (rec.frames.length < SCREENCAST_MAX_FRAMES) rec.frames.push({ data: f.data, t: Number(f.metadata?.timestamp) || Date.now() / 1000 });
+        else rec.dropped += 1;
+        try { await cdp.send("Page.screencastFrameAck", { sessionId: f.sessionId }); } catch {}
+      });
+      await cdp.send("Page.startScreencast", { format: "jpeg", quality: Number(quality) || 70, maxWidth: 1920, maxHeight: 1080, everyNthFrame: 1 });
+      session.screencast = rec;
+      await walkEvent("step", { ok: true, state: "recording", session_id: sessionId, recording_id: rec.id });
+      return c.json({ status: "recording", sessionId, recordingId: rec.id });
+    }
+
+    if (action === "stop") {
+      const rec = session.screencast;
+      if (!rec) return c.json({ error: "not_recording", sessionId }, 409);
+      session.screencast = null;
+      try { await rec.cdp.send("Page.stopScreencast"); } catch {}
+      try { await rec.cdp.detach(); } catch {}
+      if (!rec.frames.length) return c.json({ error: "no_frames_captured", sessionId, recordingId: rec.id }, 422);
+
+      const { mkdir, writeFile, readFile, rm } = await import("node:fs/promises");
+      const { spawn } = await import("node:child_process");
+      const work = `/tmp/screencast-${rec.id}`;
+      await mkdir(work, { recursive: true });
+      await mkdir(RECORDINGS_DIR, { recursive: true });
+      // each frame lasts until the next one arrived, so a still page is a held frame, not a skipped second
+      let list = "";
+      for (let i = 0; i < rec.frames.length; i++) {
+        const name = `f${String(i).padStart(6, "0")}.jpg`;
+        await writeFile(`${work}/${name}`, Buffer.from(rec.frames[i].data, "base64"));
+        const next = rec.frames[i + 1]?.t ?? (Date.now() / 1000);
+        const dur = Math.min(Math.max(next - rec.frames[i].t, 0.04), 10);
+        list += `file '${name}'
+duration ${dur.toFixed(3)}
+`;
+      }
+      list += `file 'f${String(rec.frames.length - 1).padStart(6, "0")}.jpg'
+`;
+      await writeFile(`${work}/list.txt`, list);
+      const out = `${RECORDINGS_DIR}/${rec.id}.mp4`;
+      const code = await new Promise<number>((resolve) => {
+        const ff = spawn("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", `${work}/list.txt`, "-vsync", "vfr",
+          "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", out], { stdio: "ignore" });
+        ff.on("error", () => resolve(-1));
+        ff.on("exit", (c2) => resolve(c2 ?? -1));
+      });
+      await rm(work, { recursive: true, force: true }).catch(() => {});
+      if (code !== 0) return c.json({ error: "encode_failed", ffmpeg_exit: code, sessionId, recordingId: rec.id, frames: rec.frames.length }, 500);
+      const mp4 = await readFile(out);
+      const seconds = Math.round((Date.now() - rec.startedAt) / 100) / 10;
+      await walkEvent("step", { ok: true, state: "recorded", session_id: sessionId, recording_id: rec.id, frames: rec.frames.length, seconds, bytes: mp4.length });
+      return c.json({ status: "recorded", sessionId, recordingId: rec.id, frames: rec.frames.length, dropped: rec.dropped, seconds, bytes: mp4.length, mime: "video/mp4", data: mp4.toString("base64") });
+    }
+
+    return c.json({ error: "unknown_action", action, allowed: ["start", "stop"] }, 400);
   } catch (error) {
     console.error("[PLAYWRIGHT] Error:", error);
-    return c.json({ error: "Failed to start screencast", details: error.message }, 500);
+    return c.json({ error: "Failed to screencast", details: error.message }, 500);
+  }
+});
+
+// POST /recording — read a finished recording again by id
+app.post("/recording", ownerGate, async (c) => {
+  try {
+    const { recordingId } = await c.req.json();
+    if (!/^[0-9a-f-]{36}$/.test(String(recordingId || ""))) return c.json({ error: "recordingId_required" }, 400);
+    const { readFile } = await import("node:fs/promises");
+    const mp4 = await readFile(`${RECORDINGS_DIR}/${recordingId}.mp4`).catch(() => null);
+    if (!mp4) return c.json({ error: "recording_not_found", recordingId }, 404);
+    return c.json({ status: "recording", recordingId, bytes: mp4.length, mime: "video/mp4", data: mp4.toString("base64") });
+  } catch (error) {
+    return c.json({ error: "Failed to read recording", details: error.message }, 500);
   }
 });
 
