@@ -2223,23 +2223,28 @@ const RECORDINGS_DIR = process.env.PLAYWRIGHT_RECORDINGS_DIR || "/var/lib/memell
 const SCREENCAST_MAX_FRAMES = Number(process.env.PLAYWRIGHT_SCREENCAST_MAX_FRAMES) || 9000;
 app.post("/screencast", ownerGate, async (c) => {
   try {
-    const { sessionId, action = "start", quality } = await c.req.json();
+    const { sessionId, action = "start", quality, width, height, fps } = await c.req.json();
     const session = sessions.get(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
 
     if (action === "start") {
       if (session.screencast) return c.json({ status: "recording", sessionId, recordingId: session.screencast.id, frames: session.screencast.frames.length });
+      /* Mel 2026-10-03: the screenshot is 4K, so the video is not a 1050x736 window. The page is set to the
+       * recording size (default 1080p, up to 4K) and the encode holds a steady frame rate (default 30). */
+      const w = Math.min(Math.max(Number(width) || 1920, 320), 3840);
+      const h = Math.min(Math.max(Number(height) || 1080, 240), 2160);
+      await session.page.setViewportSize({ width: w, height: h });
       const cdp = await session.context.newCDPSession(session.page);
-      const rec = { id: randomUUID(), cdp, frames: [] as Array<{ data: string; t: number }>, startedAt: Date.now(), dropped: 0 };
+      const rec = { id: randomUUID(), cdp, frames: [] as Array<{ data: string; t: number }>, startedAt: Date.now(), dropped: 0, width: w, height: h, fps: Math.min(Math.max(Number(fps) || 30, 1), 60) };
       cdp.on("Page.screencastFrame", async (f: any) => {
         if (rec.frames.length < SCREENCAST_MAX_FRAMES) rec.frames.push({ data: f.data, t: Number(f.metadata?.timestamp) || Date.now() / 1000 });
         else rec.dropped += 1;
         try { await cdp.send("Page.screencastFrameAck", { sessionId: f.sessionId }); } catch {}
       });
-      await cdp.send("Page.startScreencast", { format: "jpeg", quality: Number(quality) || 70, maxWidth: 1920, maxHeight: 1080, everyNthFrame: 1 });
+      await cdp.send("Page.startScreencast", { format: "jpeg", quality: Number(quality) || 90, maxWidth: w, maxHeight: h, everyNthFrame: 1 });
       session.screencast = rec;
       await walkEvent("step", { ok: true, state: "recording", session_id: sessionId, recording_id: rec.id });
-      return c.json({ status: "recording", sessionId, recordingId: rec.id });
+      return c.json({ status: "recording", sessionId, recordingId: rec.id, width: w, height: h, fps: rec.fps });
     }
 
     if (action === "stop") {
@@ -2271,8 +2276,8 @@ duration ${dur.toFixed(3)}
       await writeFile(`${work}/list.txt`, list);
       const out = `${RECORDINGS_DIR}/${rec.id}.mp4`;
       const code = await new Promise<number>((resolve) => {
-        const ff = spawn("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", `${work}/list.txt`, "-vsync", "vfr",
-          "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", out], { stdio: "ignore" });
+        const ff = spawn("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", `${work}/list.txt`, "-vf", `fps=${rec.fps},scale=${rec.width}:${rec.height}:force_original_aspect_ratio=decrease,pad=${rec.width}:${rec.height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+          "-r", String(rec.fps), "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-movflags", "+faststart", out], { stdio: "ignore" });
         ff.on("error", () => resolve(-1));
         ff.on("exit", (c2) => resolve(c2 ?? -1));
       });
@@ -2281,7 +2286,7 @@ duration ${dur.toFixed(3)}
       const mp4 = await readFile(out);
       const seconds = Math.round((Date.now() - rec.startedAt) / 100) / 10;
       await walkEvent("step", { ok: true, state: "recorded", session_id: sessionId, recording_id: rec.id, frames: rec.frames.length, seconds, bytes: mp4.length });
-      return c.json({ status: "recorded", sessionId, recordingId: rec.id, frames: rec.frames.length, dropped: rec.dropped, seconds, bytes: mp4.length, mime: "video/mp4", data: mp4.toString("base64") });
+      return c.json({ status: "recorded", sessionId, recordingId: rec.id, frames: rec.frames.length, dropped: rec.dropped, seconds, width: rec.width, height: rec.height, fps: rec.fps, bytes: mp4.length, mime: "video/mp4", data: mp4.toString("base64") });
     }
 
     return c.json({ error: "unknown_action", action, allowed: ["start", "stop"] }, 400);
