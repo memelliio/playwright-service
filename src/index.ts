@@ -849,7 +849,10 @@ async function openPersistentChrome(chromium: any, profileDir: string) {
       timezoneId: "America/Los_Angeles",
       acceptDownloads: true,
       // Software WebGL (SwiftShader) only when PLAYWRIGHT_SOFTWARE_WEBGL=1: it draws the 3D wall/orb (for recording it) but software 3D on every page starves other work - a 4K Terminal export went from 6 s to ~40 min. Mel 2026-09-28.
-      args: ["--no-sandbox", "--disable-dev-shm-usage", ...(process.env.PLAYWRIGHT_SOFTWARE_WEBGL === "1" ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] : [])],
+      // WebGPU on a CPU Vulkan adapter (Mel 2026-10-03, "deploy it"): FreeCut's 55 GPU effects (color grade, glow, grain, LUT...)
+      // refused to render - "WebGPU is unavailable in this environment" - because this box has no GPU and Chrome had WebGPU off.
+      // WebGPU only runs when a page asks for it (FreeCut's light engine), so other pages are not slowed the way software WebGL was.
+      args: ["--no-sandbox", "--disable-dev-shm-usage", "--enable-unsafe-webgpu", "--enable-features=Vulkan", "--ignore-gpu-blocklist", ...(process.env.PLAYWRIGHT_SOFTWARE_WEBGL === "1" ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] : [])],
       ...(process.env.PLAYWRIGHT_PROXY_SERVER
         ? { proxy: { server: process.env.PLAYWRIGHT_PROXY_SERVER, username: process.env.PLAYWRIGHT_PROXY_USERNAME, password: process.env.PLAYWRIGHT_PROXY_PASSWORD, ...(process.env.PLAYWRIGHT_PROXY_BYPASS ? { bypass: process.env.PLAYWRIGHT_PROXY_BYPASS } : {}) } }
         : {}),
