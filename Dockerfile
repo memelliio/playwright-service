@@ -12,6 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends xvfb ffmpeg lib
 # · reverb Dragonfly · noise Noise Repellent · drums DrumGizmo (renders a MIDI pattern). lilv-utils gives lv2ls to list what landed.
 # One package at a time, so a name this Debian release lacks is named in the build log instead of failing the whole image.
 RUN apt-get update && for p in lilv-utils lsp-plugins-lv2 x42-plugins zam-plugins calf-plugins dragonfly-reverb-lv2 noise-repellent drumgizmo tini; do       apt-get install -y --no-install-recommends "$p" || echo "STUDIO RACK: package not available here: $p";     done && rm -rf /var/lib/apt/lists/*
+# The Infinity instruments + the plugin host (Mel 2026-10-04: "the verb needs, the instruments - do it all").
+# carla = the headless host that loads LV2/VST2/VST3/SF2/SFZ (and the DPF plugins ffmpeg cannot: Dragonfly reverb, ZAM);
+# fluidsynth + General MIDI soundfonts (FluidR3 MIT, MuseScore General MIT) = piano, keys, bass, strings, pads, leads, drums
+# from a MIDI pattern; ZynAddSubFX = synth pads/leads. Same one-at-a-time loop: a missing name is logged, never a failed image.
+RUN apt-get update && for p in carla carla-lv2 fluidsynth fluid-soundfont-gm musescore-general-soundfont-small zynaddsubfx-lv2 setbfree; do       apt-get install -y --no-install-recommends "$p" || echo "INSTRUMENTS: package not available here: $p";     done && rm -rf /var/lib/apt/lists/*
 # Where the Chrome profile lives. Cookies survive here between runs - see CHROME_PROFILE_DIR.
 RUN mkdir -p /var/lib/memelli-chrome/worker /var/lib/memelli-chrome/session /var/lib/memelli-chrome/recordings
 COPY src ./src
