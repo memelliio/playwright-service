@@ -17,6 +17,9 @@ RUN apt-get update && for p in lilv-utils lsp-plugins-lv2 x42-plugins zam-plugin
 # fluidsynth + General MIDI soundfonts (FluidR3 MIT, MuseScore General MIT) = piano, keys, bass, strings, pads, leads, drums
 # from a MIDI pattern; ZynAddSubFX = synth pads/leads. Same one-at-a-time loop: a missing name is logged, never a failed image.
 RUN apt-get update && for p in carla carla-lv2 fluidsynth fluid-soundfont-gm musescore-general-soundfont-small zynaddsubfx-lv2 setbfree; do       apt-get install -y --no-install-recommends "$p" || echo "INSTRUMENTS: package not available here: $p";     done && rm -rf /var/lib/apt/lists/*
+# Infinity Stems (Mel 2026-10-04: "grab the weights ... run separately"): HTDemucs (MIT) in its own Python env, CPU torch,
+# the htdemucs weights fetched at build time so a node never downloads mid-job. Tolerant like the rest: a failure is logged.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv python3-pip libsndfile1 && rm -rf /var/lib/apt/lists/*     && (python3 -m venv /opt/demucs       && /opt/demucs/bin/pip install --no-cache-dir torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu       && /opt/demucs/bin/pip install --no-cache-dir demucs soundfile       && /opt/demucs/bin/python -c "from demucs.pretrained import get_model; get_model('htdemucs'); print('htdemucs weights ready')"       || echo "STEMS: demucs install failed")
 # Where the Chrome profile lives. Cookies survive here between runs - see CHROME_PROFILE_DIR.
 RUN mkdir -p /var/lib/memelli-chrome/worker /var/lib/memelli-chrome/session /var/lib/memelli-chrome/recordings
 COPY src ./src
