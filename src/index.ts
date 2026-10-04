@@ -1383,7 +1383,7 @@ set status='running',
     attempt_count=coalesce(sw.attempt_count,0)+1
 from candidate
 where sw.id=candidate.id
-returning sw.id, sw.topic, sw.instruction, sw.work_class, sw.lane, sw.status, sw.dedupe_key;
+returning sw.id, sw.topic, sw.instruction, sw.work_class, sw.lane, sw.status, sw.dedupe_key, sw.root_id, sw.depth, sw.priority;
 `);
   return rows[0] || null;
 }
