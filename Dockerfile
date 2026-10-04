@@ -20,6 +20,11 @@ RUN apt-get update && for p in carla carla-lv2 fluidsynth fluid-soundfont-gm mus
 # Infinity Stems (Mel 2026-10-04: "grab the weights ... run separately"): HTDemucs (MIT) in its own Python env, CPU torch,
 # the htdemucs weights fetched at build time so a node never downloads mid-job. Tolerant like the rest: a failure is logged.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv python3-pip libsndfile1 && rm -rf /var/lib/apt/lists/*     && (python3 -m venv /opt/demucs       && /opt/demucs/bin/pip install --no-cache-dir torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu       && /opt/demucs/bin/pip install --no-cache-dir demucs soundfile       && /opt/demucs/bin/python -c "from demucs.pretrained import get_model; get_model('htdemucs'); print('htdemucs weights ready')"       || echo "STEMS: demucs install failed")
+# Infinity Match (the real mastering stage, Mel 2026-10-04: "is the real mastering chain here?"): Matchering 2.0 (GPL-3, run as
+# our service) masters a track to match a reference's RMS, frequency response, peak and stereo width. Same venv as Demucs.
+RUN (/opt/demucs/bin/pip install --no-cache-dir matchering \
+      && printf '#!/bin/sh\nexec /opt/demucs/bin/python -c "import sys, matchering as mg; mg.process(target=sys.argv[1], reference=sys.argv[2], results=[mg.pcm24(sys.argv[3])])" "$@"\n' > /usr/local/bin/infinity-match \
+      && chmod +x /usr/local/bin/infinity-match && echo "matchering ready") || echo "MATCH: matchering install failed"
 # Where the Chrome profile lives. Cookies survive here between runs - see CHROME_PROFILE_DIR.
 RUN mkdir -p /var/lib/memelli-chrome/worker /var/lib/memelli-chrome/session /var/lib/memelli-chrome/recordings
 COPY src ./src

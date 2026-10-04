@@ -1443,7 +1443,7 @@ async function handleCreditMonitoring(work: any, registry: any) {
  * that output. What a node DOES is the hot-loaded row spawn.worker.handler_registry -> workers.studio_node.handlers.<contract>
  * = {kind:'audio_node', tool, args[], filter_script?, out_ext, timeout_ms}; nothing about a node is typed here except the tool
  * allow-list. Outputs land in control_store.media_assets (kind audio), the store the song player already streams from. */
-const STUDIO_TOOLS: Record<string, string> = { ffmpeg: "ffmpeg", fluidsynth: "fluidsynth", demucs: "/opt/demucs/bin/demucs" };
+const STUDIO_TOOLS: Record<string, string> = { ffmpeg: "ffmpeg", fluidsynth: "fluidsynth", demucs: "/opt/demucs/bin/demucs", match: "/usr/local/bin/infinity-match" };
 
 async function handleStudioNode(work: any, registry: any, payload: any) {
   const { execFile } = await import("node:child_process");
@@ -1460,12 +1460,19 @@ async function handleStudioNode(work: any, registry: any, payload: any) {
   try {
     const input = payload.input || {};
     let inPath = "";
-    if (input.asset_id) {
-      const r = await dbPool.query("select output_blob, format from control_store.media_assets where id=$1 and kind='audio' limit 1", [String(input.asset_id)]);
-      const blob = r.rows[0]?.output_blob;
-      if (!blob) throw new Error(`input asset not found: ${input.asset_id}`);
-      inPath = `${dir}/in.${String(input.ext || r.rows[0]?.format || "mp3").replace(/[^a-z0-9]/gi, "")}`;
-      await fs.writeFile(inPath, Buffer.from(String(blob), "base64"));
+    /* more than one input (a mix takes vocal + beat, a match-master takes the track + its reference): input.assets = [a, b, ...]
+     * -> {in}, {in2}, {in3} ... ; a single input.asset_id is the same as assets [id] */
+    const assets: string[] = Array.isArray(input.assets) ? input.assets.map(String) : input.asset_id ? [String(input.asset_id)] : [];
+    const extra: Record<string, string> = {};
+    if (assets.length) {
+      for (let i = 0; i < assets.length; i++) {
+        const r = await dbPool.query("select output_blob, format from control_store.media_assets where id=$1 and kind='audio' limit 1", [assets[i]]);
+        const blob = r.rows[0]?.output_blob;
+        if (!blob) throw new Error(`input asset not found: ${assets[i]}`);
+        const path = `${dir}/in${i ? i + 1 : ""}.${String(r.rows[0]?.format || "mp3").replace(/[^a-z0-9]/gi, "")}`;
+        await fs.writeFile(path, Buffer.from(String(blob), "base64"));
+        if (i === 0) inPath = path; else extra[`in${i + 1}`] = path;
+      }
     } else if (input.midi_b64) {
       inPath = `${dir}/in.mid`;
       await fs.writeFile(inPath, Buffer.from(String(input.midi_b64), "base64"));
@@ -1474,7 +1481,7 @@ async function handleStudioNode(work: any, registry: any, payload: any) {
     }
     const outExt = String(handler.out_ext || "mp3").replace(/[^a-z0-9]/gi, "");
     let outPath = `${dir}/out.${outExt}`;
-    const vars: Record<string, string> = { in: inPath, out: outPath, dir, ...(handler.vars || {}), ...(payload.vars || {}) };
+    const vars: Record<string, string> = { in: inPath, ...extra, out: outPath, dir, ...(handler.vars || {}), ...(payload.vars || {}) };
     const fill = (text: string) => text.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
     /* a tool that names its own output file (demucs writes <dir>/sep/htdemucs/vocals.wav) says where in the row: out_path */
     if (handler.out_path) outPath = fill(String(handler.out_path));
@@ -1489,13 +1496,13 @@ async function handleStudioNode(work: any, registry: any, payload: any) {
     await dbPool.query(
       "insert into control_store.media_assets (id, kind, name, format, byte_size, output_blob, source, status, model_used, metadata, created_at) values ($1,'audio',$2,$3,$4,$5,'studio_node','done',$6,$7::jsonb,now())",
       [assetId, String(payload.name || contract), outExt, String(out.length), out.toString("base64"), `${tool}:${contract}`,
-        JSON.stringify({ contract, work_id: work.id, input: input.asset_id ? { asset_id: input.asset_id } : { midi: Boolean(input.midi_b64) }, ms, step: Number(payload.step || 1), workflow: payload.workflow || null })]);
+        JSON.stringify({ contract, work_id: work.id, input: assets.length ? { assets } : { midi: Boolean(input.midi_b64) }, ms, step: Number(payload.step || 1), workflow: payload.workflow || null })]);
     /* the next node of the map is its own job, fed by this output */
     const chain = Array.isArray(payload.chain) ? payload.chain : [];
     let next: string | null = null;
     if (chain.length) {
       const [head, ...rest] = chain;
-      const nextPayload = { ...head, input: { asset_id: assetId }, chain: rest, step: Number(payload.step || 1) + 1, workflow: payload.workflow || null, name: payload.name || null };
+      const nextPayload = { ...head, input: { assets: [assetId, ...(Array.isArray(head.with_assets) ? head.with_assets.map(String) : [])] }, chain: rest, step: Number(payload.step || 1) + 1, workflow: payload.workflow || null, name: payload.name || null };
       const ins = await dbPool.query(
         "insert into control_store.spawn_work (topic, instruction, work_class, lane, priority, source, parent_id, root_id, depth, dedupe_key, reason_created) values ($1,$2,$3,'studio',$4,'studio_node',$5,$6,$7,$8,$9) returning id",
         [`studio node ${head.contract} (step ${nextPayload.step})`, JSON.stringify(nextPayload), `studio.${String(head.contract || "").replace(/^studio\./, "")}`, Number(work.priority || 5), String(work.id), String(work.root_id || work.id), Number(work.depth || 0) + 1, `studio:${work.id}:${nextPayload.step}`, `chain from ${contract}`]);
