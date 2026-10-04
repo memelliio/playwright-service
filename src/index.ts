@@ -791,22 +791,34 @@ async function describeAuthPage(page: any) {
  * the old flag told every caller after the first that ":99" was ready before Xvfb had made its socket - their Chrome found
  * no display and exited ("Missing X server or $DISPLAY", measured 2026-09-30 21:13 UTC). Every caller now awaits the same start. */
 let displayReady: Promise<string> | null = null;
+// The virtual screen must be ALIVE, not just named (Mel 2026-10-04: "we shouldn't have to keep restarting it").
+// Railway starts this service with `bun src/index.ts`, so the Dockerfile's xvfb-run never runs and the screen comes from here.
+// Before: a leftover /tmp/.X11-unix/X99 socket (or an inherited DISPLAY) from a dead Xvfb was trusted, the screen was never
+// restarted, and every browser failed with "Missing X server" until someone restarted the service by hand.
+async function xvfbAlive(): Promise<boolean> {
+  const { existsSync, readFileSync } = await import("fs");
+  if (!existsSync("/tmp/.X99-lock") || !existsSync("/tmp/.X11-unix/X99")) return false;
+  try { const pid = Number(readFileSync("/tmp/.X99-lock", "utf8").trim()); if (!pid) return false; process.kill(pid, 0); return true } catch { return false }
+}
 async function ensureDisplay() {
-  if (process.env.DISPLAY) return process.env.DISPLAY;
+  if (await xvfbAlive()) { process.env.DISPLAY = ":99"; return ":99"; }
+  displayReady = null;
   if (!displayReady) {
     displayReady = (async () => {
       const { spawn } = await import("child_process");
-      const { existsSync } = await import("fs");
-      if (!existsSync("/tmp/.X11-unix/X99")) spawn("Xvfb", [":99", "-screen", "0", "1440x900x24", "-nolisten", "tcp"], { detached: true, stdio: "ignore" }).unref();
+      const { existsSync, unlinkSync } = await import("fs");
+      // a dead screen leaves its lock and socket behind - clear them so a new one can start
+      for (const f of ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"]) { try { unlinkSync(f) } catch {} }
+      spawn("Xvfb", [":99", "-screen", "0", "1440x900x24", "-nolisten", "tcp"], { detached: true, stdio: "ignore" }).unref();
       for (let i = 0; i < 50; i++) {
-        if (existsSync("/tmp/.X11-unix/X99")) break;
+        if (await xvfbAlive()) break;
         await new Promise((r) => setTimeout(r, 100));
       }
-      if (!existsSync("/tmp/.X11-unix/X99")) {
-        throw new Error("xserver_did_not_start: Xvfb :99 never created its socket, so a headed Chrome cannot run");
+      if (!(await xvfbAlive())) {
+        throw new Error("xserver_did_not_start: Xvfb :99 never came up, so a headed Chrome cannot run");
       }
       process.env.DISPLAY = ":99";
-      console.log("[PLAYWRIGHT] display :99 up");
+      console.log("[PLAYWRIGHT] display :99 up (alive check)");
       return ":99";
     })().catch((error) => { displayReady = null; throw error; });
   }
