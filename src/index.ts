@@ -1370,6 +1370,8 @@ with candidate as (
       or lane='credit_monitoring'
       or instruction ilike '%"required_worker": "playwright_bureau_monitor"%'
       or instruction ilike '%"required_worker":"playwright_bureau_monitor"%'
+      or lane='studio'
+      or work_class like 'studio.%'
     )
   order by priority desc nulls last, created_at asc
   limit 1
@@ -1435,6 +1437,74 @@ async function handleCreditMonitoring(work: any, registry: any) {
   return { kind, route, body, result };
 }
 
+/* THE STUDIO NODES (Mel 2026-10-04: "comfy weights can be ran separately ... you guys are running this all on one line").
+ * ComfyUI is the MAP: a workflow is a list of nodes, and each node is ONE tool on ONE input - its own spawn_work job (lane
+ * 'studio'), claimed here, run, its output stored, then the next node of the chain is queued as a job of its own, fed by
+ * that output. What a node DOES is the hot-loaded row spawn.worker.handler_registry -> workers.studio_node.handlers.<contract>
+ * = {kind:'audio_node', tool, args[], filter_script?, out_ext, timeout_ms}; nothing about a node is typed here except the tool
+ * allow-list. Outputs land in control_store.media_assets (kind audio), the store the song player already streams from. */
+const STUDIO_TOOLS: Record<string, string> = { ffmpeg: "ffmpeg", fluidsynth: "fluidsynth" };
+
+async function handleStudioNode(work: any, registry: any, payload: any) {
+  const { execFile } = await import("node:child_process");
+  const fs = await import("node:fs/promises");
+  const contract = String(payload.contract || "");
+  const handler = registry?.workers?.studio_node?.handlers?.[contract];
+  if (!handler || handler.kind !== "audio_node") throw new Error(`no hotloaded studio node for ${contract || "(missing)"}`);
+  const tool = STUDIO_TOOLS[String(handler.tool || "")];
+  if (!tool) throw new Error(`studio node ${contract}: tool ${handler.tool} is not one of ${Object.keys(STUDIO_TOOLS).join(", ")}`);
+  if (!dbPool) throw new Error("database connection missing");
+  const dir = `/tmp/studio-${String(work.id).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  await fs.mkdir(dir, { recursive: true });
+  const started = Date.now();
+  try {
+    const input = payload.input || {};
+    let inPath = "";
+    if (input.asset_id) {
+      const r = await dbPool.query("select output_blob, format from control_store.media_assets where id=$1 and kind='audio' limit 1", [String(input.asset_id)]);
+      const blob = r.rows[0]?.output_blob;
+      if (!blob) throw new Error(`input asset not found: ${input.asset_id}`);
+      inPath = `${dir}/in.${String(input.ext || r.rows[0]?.format || "mp3").replace(/[^a-z0-9]/gi, "")}`;
+      await fs.writeFile(inPath, Buffer.from(String(blob), "base64"));
+    } else if (input.midi_b64) {
+      inPath = `${dir}/in.mid`;
+      await fs.writeFile(inPath, Buffer.from(String(input.midi_b64), "base64"));
+    } else if (handler.needs_input !== false) {
+      throw new Error("studio node needs input.asset_id or input.midi_b64");
+    }
+    const outExt = String(handler.out_ext || "mp3").replace(/[^a-z0-9]/gi, "");
+    const outPath = `${dir}/out.${outExt}`;
+    const vars: Record<string, string> = { in: inPath, out: outPath, dir, ...(handler.vars || {}), ...(payload.vars || {}) };
+    const fill = (text: string) => text.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+    if (handler.filter_script) { vars.filter = `${dir}/filter.txt`; await fs.writeFile(vars.filter, fill(String(handler.filter_script))); }
+    const args = (Array.isArray(handler.args) ? handler.args : []).map((a: any) => fill(String(a)));
+    await new Promise<void>((resolve, reject) =>
+      execFile(tool, args, { timeout: Number(handler.timeout_ms) || 300000, maxBuffer: 8 << 20 }, (err, _out, stderr) =>
+        err ? reject(new Error(`${tool} failed: ${String(stderr || err.message).slice(-400)}`)) : resolve()));
+    const out = await fs.readFile(outPath);
+    const assetId = `studio-${contract.replace(/[^a-z0-9]+/gi, "-")}-${randomUUID().slice(0, 8)}`;
+    const ms = Date.now() - started;
+    await dbPool.query(
+      "insert into control_store.media_assets (id, kind, name, format, byte_size, output_blob, source, status, model_used, metadata, created_at) values ($1,'audio',$2,$3,$4,$5,'studio_node','done',$6,$7::jsonb,now())",
+      [assetId, String(payload.name || contract), outExt, String(out.length), out.toString("base64"), `${tool}:${contract}`,
+        JSON.stringify({ contract, work_id: work.id, input: input.asset_id ? { asset_id: input.asset_id } : { midi: Boolean(input.midi_b64) }, ms, step: Number(payload.step || 1), workflow: payload.workflow || null })]);
+    /* the next node of the map is its own job, fed by this output */
+    const chain = Array.isArray(payload.chain) ? payload.chain : [];
+    let next: string | null = null;
+    if (chain.length) {
+      const [head, ...rest] = chain;
+      const nextPayload = { ...head, input: { asset_id: assetId }, chain: rest, step: Number(payload.step || 1) + 1, workflow: payload.workflow || null, name: payload.name || null };
+      const ins = await dbPool.query(
+        "insert into control_store.spawn_work (topic, instruction, work_class, lane, priority, source, parent_id, root_id, depth, dedupe_key, reason_created) values ($1,$2,$3,'studio',$4,'studio_node',$5,$6,$7,$8,$9) returning id",
+        [`studio node ${head.contract} (step ${nextPayload.step})`, JSON.stringify(nextPayload), `studio.${String(head.contract || "").replace(/^studio\./, "")}`, Number(work.priority || 5), String(work.id), String(work.root_id || work.id), Number(work.depth || 0) + 1, `studio:${work.id}:${nextPayload.step}`, `chain from ${contract}`]);
+      next = ins.rows[0]?.id || null;
+    }
+    return { kind: "audio_node", contract, tool, asset_id: assetId, bytes: out.length, ms, next_work_id: next, play: `/api/song/audio?asset_id=${assetId}` };
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function executeWork(work: any) {
   const registry = await loadHandlerRegistry();
   const payload = extractJsonObject(String(work.instruction || ""));
@@ -1446,6 +1516,7 @@ async function executeWork(work: any) {
     case "credit_weekly_refresh_bureau_check_v1":
       return await handleCreditMonitoring(work, registry);
     default:
+      if (String(work.lane || "") === "studio" || /^studio\./.test(String(payload.contract || ""))) return await handleStudioNode(work, registry, payload);
       throw new Error(`no hotloaded handler for contract ${payload.contract || "(missing)"}`);
   }
 }
