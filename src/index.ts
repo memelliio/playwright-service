@@ -1443,7 +1443,7 @@ async function handleCreditMonitoring(work: any, registry: any) {
  * that output. What a node DOES is the hot-loaded row spawn.worker.handler_registry -> workers.studio_node.handlers.<contract>
  * = {kind:'audio_node', tool, args[], filter_script?, out_ext, timeout_ms}; nothing about a node is typed here except the tool
  * allow-list. Outputs land in control_store.media_assets (kind audio), the store the song player already streams from. */
-const STUDIO_TOOLS: Record<string, string> = { ffmpeg: "ffmpeg", fluidsynth: "fluidsynth" };
+const STUDIO_TOOLS: Record<string, string> = { ffmpeg: "ffmpeg", fluidsynth: "fluidsynth", demucs: "/opt/demucs/bin/demucs" };
 
 async function handleStudioNode(work: any, registry: any, payload: any) {
   const { execFile } = await import("node:child_process");
@@ -1473,9 +1473,11 @@ async function handleStudioNode(work: any, registry: any, payload: any) {
       throw new Error("studio node needs input.asset_id or input.midi_b64");
     }
     const outExt = String(handler.out_ext || "mp3").replace(/[^a-z0-9]/gi, "");
-    const outPath = `${dir}/out.${outExt}`;
+    let outPath = `${dir}/out.${outExt}`;
     const vars: Record<string, string> = { in: inPath, out: outPath, dir, ...(handler.vars || {}), ...(payload.vars || {}) };
     const fill = (text: string) => text.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+    /* a tool that names its own output file (demucs writes <dir>/sep/htdemucs/vocals.wav) says where in the row: out_path */
+    if (handler.out_path) outPath = fill(String(handler.out_path));
     if (handler.filter_script) { vars.filter = `${dir}/filter.txt`; await fs.writeFile(vars.filter, fill(String(handler.filter_script))); }
     const args = (Array.isArray(handler.args) ? handler.args : []).map((a: any) => fill(String(a)));
     await new Promise<void>((resolve, reject) =>
