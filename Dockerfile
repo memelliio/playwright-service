@@ -33,7 +33,7 @@ RUN (python3 -m venv /opt/sprites \
       && REMBG_HOME=/opt/sprites/models /opt/sprites/bin/python -c "from rembg import new_session; new_session('u2net_human_seg'); print('sprite weights ready')" \
       && printf '#!/bin/sh\nREMBG_HOME=/opt/sprites/models exec /opt/sprites/bin/python /app/scripts/infinity_sprite.py "$@"\n' > /usr/local/bin/infinity-sprite \
       && chmod +x /usr/local/bin/infinity-sprite) || echo "SPRITES: rembg install failed"
-# Infinity Studio Matrix run: one of her graphs on our own ComfyUI (stdlib Python only; ComfyUI itself and its weights live on the
+# Infinity Studio Matrix run: one of the MAA's graphs on our own ComfyUI (stdlib Python only; ComfyUI itself and its weights live on the
 # volume - scripts/comfyui-setup.sh fills them at boot, at the lowest priority).
 RUN printf '#!/bin/sh\nexec python3 /app/scripts/infinity_comfy.py "$@"\n' > /usr/local/bin/infinity-comfy && chmod +x /usr/local/bin/infinity-comfy
 # Where the Chrome profile lives. Cookies survive here between runs - see CHROME_PROFILE_DIR.

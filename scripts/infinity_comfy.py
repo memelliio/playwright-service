@@ -1,4 +1,4 @@
-# Infinity Studio Matrix run - one of her graphs on our own ComfyUI (127.0.0.1, CPU, $0). Called by the studio node through
+# Infinity Studio Matrix run - one of the MAA's graphs on our own ComfyUI (127.0.0.1, CPU, $0). Called by the studio node through
 # /usr/local/bin/infinity-comfy:
 #   infinity-comfy <graph.json> <out> [params.json|-] [in] [in2] [in3] ...
 # graph.json is the row's workflow_json from control_store.comfyui_workflows (the API graph, or a row that holds one); nothing about a

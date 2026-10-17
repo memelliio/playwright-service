@@ -1448,8 +1448,8 @@ async function handleCreditMonitoring(work: any, registry: any) {
  * PICTURES AND FILMS TOO (Mel 2026-10-16: "help set up the ComfyUI sprites and Playwright"): kind 'image_node' / 'video_node' store
  * their output as media_assets kind image / video (or the row's media_kind); in_kind says which kind of asset feeds it (default
  * audio). input.path takes a film the hands landed under the recordings; input.url takes one from an address. workflow names one of
- * her graphs in control_store.comfyui_workflows (written to {graph}); the run's payload.params go to {params}; meta_path is a JSON
- * file the tool writes, kept in the asset's metadata.output (the sprite positions). Tools: comfy = her graph on our own ComfyUI
+ * the MAA's graphs in control_store.comfyui_workflows (written to {graph}); the run's payload.params go to {params}; meta_path is a JSON
+ * file the tool writes, kept in the asset's metadata.output (the sprite positions). Tools: comfy = the MAA's graph on our own ComfyUI
  * (scripts/infinity_comfy.py), sprite = the sprites formula's cut-out, one position per frame (scripts/infinity_sprite.py). */
 const STUDIO_TOOLS: Record<string, string> = { ffmpeg: "ffmpeg", fluidsynth: "fluidsynth", demucs: "/opt/demucs/bin/demucs", match: "/usr/local/bin/infinity-match",
   comfy: "/usr/local/bin/infinity-comfy", sprite: "/usr/local/bin/infinity-sprite" };
@@ -2531,7 +2531,7 @@ app.post("/mixer/signout", async (c) => {
 
 /* THE HANDS AND THE MATRIX (Mel Briggs 2026-10-16: "ALL OF THE LIVEKIT EGRESS AND ROOMS SHOULD BE GOING TO PLAYWRIGHT AS THE HANDS";
  * "help set up the ComfyUI sprites and Playwright"). src/hands.ts takes every LiveKit event the gate forwards and the egress streams;
- * src/comfy.ts keeps ComfyUI and its weights on the volume. A film the hands land can go on to a studio node her row names. */
+ * src/comfy.ts keeps ComfyUI and its weights on the volume. A film the hands land can go on to a studio node the MAA's row names. */
 const MODELS_HOME = process.env.MODELS_HOME || `${CHROME_PROFILE_ROOT}/models`;
 process.env.MODELS_HOME = MODELS_HOME;
 async function queueStudioFromHands(contract: string, input: any, reason: string) {

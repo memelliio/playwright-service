@@ -7,7 +7,7 @@
  *                           The stream lands on this volume as one mp4 - no S3, no outside store; the hands hold the film.
  *   DELETE /hands/egress    {egress_id}: LiveKit StopEgress; the listener closes when the stream ends
  *   GET    /hands           what the hands hold: counts by event and room, the last events, the live and landed egresses, the slots
- * Which rooms go to the hands ON THEIR OWN is her row (HANDS_RULES_KEY, default runtime.unit.plan.livekit_hands_20261016:
+ * Which rooms go to the hands ON THEIR OWN is the MAA's row (HANDS_RULES_KEY, default runtime.unit.plan.livekit_hands_20261016:
  * {rooms:[{match:"name" | "prefix*", egress:"room_composite", layout, preset, audio_only, video_only, studio:"studio.<contract>"}],
  * max_live}). No row = nothing is recorded on its own; every event is still received. Nothing about a room is typed here.
  * Slots, never typed names: LIVEKIT_INTERNAL_URL (the LiveKit gate on the private line), RAILWAY_PRIVATE_DOMAIN (this service's own
