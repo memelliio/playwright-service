@@ -1,6 +1,6 @@
 // @ts-nocheck
 /* PLAYWRIGHT IS THE HANDS (Mel Briggs, 2026-10-16: "ALL OF THE LIVEKIT EGRESS AND ROOMS SHOULD BE GOING TO PLAYWRIGHT AS THE HANDS").
- * LiveKit's gate verifies every webhook the way LiveKit signs it and forwards it here whole; everything here opens only under Mel's CEO admin (src/ceoAdmin.ts). This module is what the
+ * LiveKit's gate verifies every webhook the way LiveKit signs it and forwards it here whole, on the lock. This module is what the
  * hands do with it:
  *   POST   /hands/livekit   every room, participant, track, egress and ingress event -> counted, kept on the volume (one ndjson a day)
  *   POST   /hands/egress    {room} or {url}: open an RTMP listener HERE, then ask LiveKit Egress to stream that room (or page) INTO it.
@@ -81,7 +81,6 @@ export function makeHands(opts: {
   loadHotloadValue: (key: string) => Promise<any>;
   queueStudio?: (contract: string, input: any, reason: string) => Promise<string | null>;
   log: (...a: any[]) => void;
-  gate: (c: any, next: any) => any;
 }) {
   const HANDS_DIR = path.join(opts.root, "hands");
   const EGRESS_DIR = path.join(opts.recordings, "egress");
@@ -274,13 +273,13 @@ export function makeHands(opts: {
       landed: landed.slice(0, 20),
       errors: S.errors,
       rules: { key: RULES_KEY, loaded: !!rules.v, rooms: Array.isArray(rules.v?.rooms) ? rules.v.rooms.length : 0 },
-      slots: { livekit: !!lkUrl(), private_name: !!String(process.env.RAILWAY_PRIVATE_DOMAIN || "").trim(), keys: !!lkKeys(), lock: !!(process.env.A || process.env.B), redis: !!process.env.REDIS_URL },
+      slots: { livekit: !!lkUrl(), private_name: !!String(process.env.RAILWAY_PRIVATE_DOMAIN || "").trim(), keys: !!lkKeys(), lock: !!(process.env.A || process.env.B) },
       kept_at: HANDS_DIR, lands_at: EGRESS_DIR,
     };
   }
 
   function routes(app: any) {
-    const gate = opts.gate; /* Mel's CEO admin: his live stamp, then his login or his chain's lock */
+    const gate = async (c: any, next: any) => (lockOk(c.req.header("x-memelli-lock")) ? next() : c.json({ ok: false, error: "the lock" }, 401));
     app.post("/hands/livekit", gate, async (c: any) => {
       const ev = await c.req.json().catch(() => null);
       if (!ev || typeof ev !== "object") return c.json({ ok: false, error: "bad json" }, 400);
