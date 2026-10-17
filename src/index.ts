@@ -3,7 +3,6 @@ import { Hono } from "hono";
 import pg from "pg";
 import { randomUUID, timingSafeEqual as timingSafeEqualBuf } from "node:crypto";
 import { verifiedBrowserScope, sameBrowserScope } from "./sessionScope";
-import { makeCoderLane } from "./coderLane";
 import { makeHands } from "./hands";
 import { makeComfy } from "./comfy";
 
@@ -2572,8 +2571,6 @@ Bun.serve({
   },
 });
 
-const coderLane = makeCoderLane({ root: CHROME_PROFILE_ROOT, log });
-coderLane.routes(app);
 log(`Listening on port ${port}`);
 bootSpawnWorker();
 comfy.boot();
