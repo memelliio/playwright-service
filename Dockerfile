@@ -5,7 +5,7 @@ RUN bun install
 # Real Google Chrome, not the bundled Chromium. Patchright names this first in its own setup.
 RUN bunx patchright install --with-deps chrome
 # A virtual display, so the browser runs headed. This box has no screen of its own.
-RUN apt-get update && apt-get install -y --no-install-recommends xvfb ffmpeg libvulkan1 mesa-vulkan-drivers && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb ffmpeg libvulkan1 mesa-vulkan-drivers git curl ca-certificates && rm -rf /var/lib/apt/lists/*
 # The studio rack (Mel 2026-10-04: "the waves bundle plugins, like Pro Tools has - did you actually go get those?"). Open-source
 # LV2 plugins that ffmpeg (built with lv2) runs headless on the timeline: -af lv2=p=<URI>. Each Waves job has its open part:
 # auto-tune x42 fat1 · de-ess / vocal rider / comp / multiband / limiter LSP · L2-style maximizer ZaMaximX2 · air/exciter + tape Calf
@@ -25,8 +25,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
 RUN (/opt/demucs/bin/pip install --no-cache-dir matchering \
       && printf '#!/bin/sh\nexec /opt/demucs/bin/python -c "import sys, matchering as mg; mg.process(target=sys.argv[1], reference=sys.argv[2], results=[mg.pcm24(sys.argv[3])])" "$@"\n' > /usr/local/bin/infinity-match \
       && chmod +x /usr/local/bin/infinity-match && echo "matchering ready") || echo "MATCH: matchering install failed"
+# Infinity Sprite Cut (Mel 2026-10-16: "help set up the ComfyUI sprites and Playwright"; the sprites formula, step 3 - the cut-out
+# person, one position per frame): rembg 2.0.85 (MIT) on onnxruntime CPU in its own venv, with u2net_human_seg (Apache-2.0) fetched at
+# build time so a node never downloads mid-job. Tolerant like the rest: a failure is logged, never a failed image.
+RUN (python3 -m venv /opt/sprites \
+      && /opt/sprites/bin/pip install --no-cache-dir "rembg[cpu]==2.0.85" \
+      && REMBG_HOME=/opt/sprites/models /opt/sprites/bin/python -c "from rembg import new_session; new_session('u2net_human_seg'); print('sprite weights ready')" \
+      && printf '#!/bin/sh\nREMBG_HOME=/opt/sprites/models exec /opt/sprites/bin/python /app/scripts/infinity_sprite.py "$@"\n' > /usr/local/bin/infinity-sprite \
+      && chmod +x /usr/local/bin/infinity-sprite) || echo "SPRITES: rembg install failed"
+# Infinity Studio Matrix run: one of the MAA's graphs on our own ComfyUI (stdlib Python only; ComfyUI itself and its weights live on the
+# volume - scripts/comfyui-setup.sh fills them at boot, at the lowest priority).
+RUN printf '#!/bin/sh\nexec python3 /app/scripts/infinity_comfy.py "$@"\n' > /usr/local/bin/infinity-comfy && chmod +x /usr/local/bin/infinity-comfy
 # Where the Chrome profile lives. Cookies survive here between runs - see CHROME_PROFILE_DIR.
 RUN mkdir -p /var/lib/memelli-chrome/worker /var/lib/memelli-chrome/session /var/lib/memelli-chrome/recordings
+COPY scripts ./scripts
 COPY src ./src
 # tini is PID 1 and reaps the dead Chrome children a walk leaves behind (423 zombies filled the 1000 process slots, 10-04).
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]

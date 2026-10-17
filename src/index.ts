@@ -3,6 +3,9 @@ import { Hono } from "hono";
 import pg from "pg";
 import { randomUUID, timingSafeEqual as timingSafeEqualBuf } from "node:crypto";
 import { verifiedBrowserScope, sameBrowserScope } from "./sessionScope";
+import { makeHands } from "./hands";
+import { makeComfy } from "./comfy";
+import { makeCeoAdmin } from "./ceoAdmin";
 
 const app = new Hono();
 const { Client, Pool } = pg;
@@ -1442,15 +1445,24 @@ async function handleCreditMonitoring(work: any, registry: any) {
  * 'studio'), claimed here, run, its output stored, then the next node of the chain is queued as a job of its own, fed by
  * that output. What a node DOES is the hot-loaded row spawn.worker.handler_registry -> workers.studio_node.handlers.<contract>
  * = {kind:'audio_node', tool, args[], filter_script?, out_ext, timeout_ms}; nothing about a node is typed here except the tool
- * allow-list. Outputs land in control_store.media_assets (kind audio), the store the song player already streams from. */
-const STUDIO_TOOLS: Record<string, string> = { ffmpeg: "ffmpeg", fluidsynth: "fluidsynth", demucs: "/opt/demucs/bin/demucs", match: "/usr/local/bin/infinity-match" };
+ * allow-list. Outputs land in control_store.media_assets (kind audio), the store the song player already streams from.
+ * PICTURES AND FILMS TOO (Mel 2026-10-16: "help set up the ComfyUI sprites and Playwright"): kind 'image_node' / 'video_node' store
+ * their output as media_assets kind image / video (or the row's media_kind); in_kind says which kind of asset feeds it (default
+ * audio). input.path takes a film the hands landed under the recordings; input.url takes one from an address. workflow names one of
+ * the MAA's graphs in control_store.comfyui_workflows (written to {graph}); the run's payload.params go to {params}; meta_path is a JSON
+ * file the tool writes, kept in the asset's metadata.output (the sprite positions). Tools: comfy = the MAA's graph on our own ComfyUI
+ * (scripts/infinity_comfy.py), sprite = the sprites formula's cut-out, one position per frame (scripts/infinity_sprite.py). */
+const STUDIO_TOOLS: Record<string, string> = { ffmpeg: "ffmpeg", fluidsynth: "fluidsynth", demucs: "/opt/demucs/bin/demucs", match: "/usr/local/bin/infinity-match",
+  comfy: "/usr/local/bin/infinity-comfy", sprite: "/usr/local/bin/infinity-sprite" };
+const STUDIO_NODE_KINDS: Record<string, string> = { audio_node: "audio", image_node: "image", video_node: "video" };
 
 async function handleStudioNode(work: any, registry: any, payload: any) {
   const { execFile } = await import("node:child_process");
   const fs = await import("node:fs/promises");
   const contract = String(payload.contract || "");
   const handler = registry?.workers?.studio_node?.handlers?.[contract];
-  if (!handler || handler.kind !== "audio_node") throw new Error(`no hotloaded studio node for ${contract || "(missing)"}`);
+  const mediaKind = handler ? String(handler.media_kind || STUDIO_NODE_KINDS[String(handler.kind)] || "") : "";
+  if (!handler || !mediaKind) throw new Error(`no hotloaded studio node for ${contract || "(missing)"}`);
   const tool = STUDIO_TOOLS[String(handler.tool || "")];
   if (!tool) throw new Error(`studio node ${contract}: tool ${handler.tool} is not one of ${Object.keys(STUDIO_TOOLS).join(", ")}`);
   if (!dbPool) throw new Error("database connection missing");
@@ -1466,18 +1478,33 @@ async function handleStudioNode(work: any, registry: any, payload: any) {
     const extra: Record<string, string> = {};
     if (assets.length) {
       for (let i = 0; i < assets.length; i++) {
-        const r = await dbPool.query("select output_blob, format from control_store.media_assets where id=$1 and kind='audio' limit 1", [assets[i]]);
+        /* in_kind is one kind for every input, or one per input (a talking video takes a picture and a voice) */
+        const inKind = Array.isArray(handler.in_kind) ? handler.in_kind[Math.min(i, handler.in_kind.length - 1)] : handler.in_kind;
+        const r = await dbPool.query("select output_blob, format from control_store.media_assets where id=$1 and kind=$2 limit 1", [assets[i], String(inKind || "audio")]);
         const blob = r.rows[0]?.output_blob;
         if (!blob) throw new Error(`input asset not found: ${assets[i]}`);
         const path = `${dir}/in${i ? i + 1 : ""}.${String(r.rows[0]?.format || "mp3").replace(/[^a-z0-9]/gi, "")}`;
         await fs.writeFile(path, Buffer.from(String(blob), "base64"));
         if (i === 0) inPath = path; else extra[`in${i + 1}`] = path;
       }
+    } else if (input.path) {
+      /* a film the hands landed on this volume - only from under the recordings */
+      const nodePath = await import("node:path");
+      const p = nodePath.resolve(String(input.path));
+      if (!p.startsWith(nodePath.resolve(RECORDINGS_DIR) + nodePath.sep)) throw new Error(`input.path must be under ${RECORDINGS_DIR}`);
+      await fs.access(p);
+      inPath = p;
+    } else if (input.url) {
+      const r = await fetch(String(input.url), { signal: AbortSignal.timeout(600000) });
+      if (!r.ok) throw new Error(`input.url answered ${r.status}`);
+      const ext = String(handler.in_ext || new URL(String(input.url)).pathname.match(/\.([a-z0-9]{2,5})$/i)?.[1] || "bin").replace(/[^a-z0-9]/gi, "");
+      inPath = `${dir}/in.${ext}`;
+      await fs.writeFile(inPath, Buffer.from(await r.arrayBuffer()));
     } else if (input.midi_b64) {
       inPath = `${dir}/in.mid`;
       await fs.writeFile(inPath, Buffer.from(String(input.midi_b64), "base64"));
     } else if (handler.needs_input !== false) {
-      throw new Error("studio node needs input.asset_id or input.midi_b64");
+      throw new Error("studio node needs input.asset_id, input.path, input.url or input.midi_b64");
     }
     const outExt = String(handler.out_ext || "mp3").replace(/[^a-z0-9]/gi, "");
     let outPath = `${dir}/out.${outExt}`;
@@ -1486,17 +1513,29 @@ async function handleStudioNode(work: any, registry: any, payload: any) {
     /* a tool that names its own output file (demucs writes <dir>/sep/htdemucs/vocals.wav) says where in the row: out_path */
     if (handler.out_path) outPath = fill(String(handler.out_path));
     if (handler.filter_script) { vars.filter = `${dir}/filter.txt`; await fs.writeFile(vars.filter, fill(String(handler.filter_script))); }
+    if (handler.workflow) {
+      const g = await dbPool.query("select workflow_json from control_store.comfyui_workflows where name=$1 limit 1", [String(handler.workflow)]);
+      if (!g.rowCount) throw new Error(`no graph ${handler.workflow} in control_store.comfyui_workflows`);
+      const wj = g.rows[0].workflow_json;
+      vars.graph = `${dir}/graph.json`;
+      await fs.writeFile(vars.graph, typeof wj === "string" ? wj : JSON.stringify(wj));
+    }
+    vars.params = `${dir}/params.json`;
+    await fs.writeFile(vars.params, JSON.stringify(payload.params || {}));
     const args = (Array.isArray(handler.args) ? handler.args : []).map((a: any) => fill(String(a)));
     await new Promise<void>((resolve, reject) =>
       execFile(tool, args, { timeout: Number(handler.timeout_ms) || 300000, maxBuffer: 8 << 20 }, (err, _out, stderr) =>
         err ? reject(new Error(`${tool} failed: ${String(stderr || err.message).slice(-400)}`)) : resolve()));
     const out = await fs.readFile(outPath);
+    let outputMeta: any = null;
+    if (handler.meta_path) { try { outputMeta = JSON.parse(await fs.readFile(fill(String(handler.meta_path)), "utf8")); } catch {} }
     const assetId = `studio-${contract.replace(/[^a-z0-9]+/gi, "-")}-${randomUUID().slice(0, 8)}`;
     const ms = Date.now() - started;
     await dbPool.query(
-      "insert into control_store.media_assets (id, kind, name, format, byte_size, output_blob, source, status, model_used, metadata, created_at) values ($1,'audio',$2,$3,$4,$5,'studio_node','done',$6,$7::jsonb,now())",
+      "insert into control_store.media_assets (id, kind, name, format, byte_size, output_blob, source, status, model_used, metadata, created_at) values ($1,$8,$2,$3,$4,$5,'studio_node','done',$6,$7::jsonb,now())",
       [assetId, String(payload.name || contract), outExt, String(out.length), out.toString("base64"), `${tool}:${contract}`,
-        JSON.stringify({ contract, work_id: work.id, input: assets.length ? { assets } : { midi: Boolean(input.midi_b64) }, ms, step: Number(payload.step || 1), workflow: payload.workflow || null })]);
+        JSON.stringify({ contract, work_id: work.id, input: assets.length ? { assets } : input.path ? { path: String(input.path) } : input.url ? { url: String(input.url) } : { midi: Boolean(input.midi_b64) }, ms, step: Number(payload.step || 1), workflow: payload.workflow || null, graph: handler.workflow || null, params: payload.params || null, output: outputMeta }),
+        mediaKind]);
     /* the next node of the map is its own job, fed by this output */
     const chain = Array.isArray(payload.chain) ? payload.chain : [];
     let next: string | null = null;
@@ -1508,7 +1547,8 @@ async function handleStudioNode(work: any, registry: any, payload: any) {
         [`studio node ${head.contract} (step ${nextPayload.step})`, JSON.stringify(nextPayload), `studio.${String(head.contract || "").replace(/^studio\./, "")}`, Number(work.priority || 5), String(work.id), String(work.root_id || work.id), Number(work.depth || 0) + 1, `studio:${work.id}:${nextPayload.step}`, `chain from ${contract}`]);
       next = ins.rows[0]?.id || null;
     }
-    return { kind: "audio_node", contract, tool, asset_id: assetId, bytes: out.length, ms, next_work_id: next, play: `/api/song/audio?asset_id=${assetId}` };
+    return { kind: String(handler.kind), media_kind: mediaKind, contract, tool, asset_id: assetId, bytes: out.length, ms, next_work_id: next,
+      play: mediaKind === "audio" ? `/api/song/audio?asset_id=${assetId}` : null, output: outputMeta ? { frames: outputMeta.frames ?? null, with_person: outputMeta.with_person ?? null } : null };
   } finally {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
   }
@@ -2490,6 +2530,27 @@ app.post("/mixer/signout", async (c) => {
   return c.json({ ok: errors.length === 0, ended, live_before: rows.length, errors, lock: { in: "A", out: "B", key: "A=[0*1]=B" }, ms: Date.now() - t });
 });
 
+/* THE HANDS AND THE MATRIX (Mel Briggs 2026-10-16: "ALL OF THE LIVEKIT EGRESS AND ROOMS SHOULD BE GOING TO PLAYWRIGHT AS THE HANDS";
+ * "help set up the ComfyUI sprites and Playwright"). src/hands.ts takes every LiveKit event the gate forwards and the egress streams;
+ * src/comfy.ts keeps ComfyUI and its weights on the volume. A film the hands land can go on to a studio node the MAA's row names. */
+const MODELS_HOME = process.env.MODELS_HOME || `${CHROME_PROFILE_ROOT}/models`;
+process.env.MODELS_HOME = MODELS_HOME;
+async function queueStudioFromHands(contract: string, input: any, reason: string) {
+  if (!dbPool) throw new Error("database connection missing");
+  const name = String(contract || "").replace(/^studio\./, "");
+  const payload = { contract: "studio." + name, input, step: 1, name: "hands " + name };
+  const ins = await dbPool.query(
+    "insert into control_store.spawn_work (topic, instruction, work_class, lane, priority, source, depth, dedupe_key, reason_created) values ($1,$2,$3,'studio',5,'hands',0,$4,$5) returning id",
+    [`studio node studio.${name} (from the hands)`, JSON.stringify(payload), `studio.${name}`, `hands:${String(input?.path || input?.url || randomUUID())}`, reason]);
+  return ins.rows[0]?.id || null;
+}
+/* both open only under Mel's CEO admin: his live stamp key:A=B, then his own login or his chain's lock (src/ceoAdmin.ts) */
+const ceo = makeCeoAdmin(dbPool);
+const hands = makeHands({ root: CHROME_PROFILE_ROOT, recordings: RECORDINGS_DIR, loadHotloadValue, queueStudio: queueStudioFromHands, log, gate: ceo.gate });
+hands.routes(app);
+const comfy = makeComfy({ modelsHome: MODELS_HOME, log, open: ceo.open });
+comfy.routes(app);
+
 /* THE CEOADMIN DOOR (Mel, 2026-09-30, CEO ADMIN INIFINITY LOCK #1519: "EVERY LAST ONE"). Any address carrying /CEOADMIN/
  * goes, whole, to the one door on DYNAMIC SPAWN ANALYTICS SERVICE over the private network; the door checks the lock
  * against A=[0*1]=B (0 = MEMELLI IO INC, 1 = Mel). This service never checks or holds a lock itself. */
@@ -2515,3 +2576,4 @@ Bun.serve({
 
 log(`Listening on port ${port}`);
 bootSpawnWorker();
+comfy.boot();
