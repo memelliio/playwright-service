@@ -1,0 +1,23 @@
+# THE WEIGHTS - the exact files the 8 graphs in control_store.comfyui_workflows load (jessica/providers/comfyui_external/WORKFLOWS.md),
+# each URL and byte size checked 2026-10-16. Tab-separated, no empty field (write -). on=1 is fetched by comfyui-setup.sh, in this order.
+# Only Apache-2.0 / MIT / BSD weights; the setup refuses anything else. Not here on purpose: flux1-dev (non-commercial).
+# On=1 today: the two that run well on this CPU box (upscale, smooth motion - the sprite chain's re-render). The rest are a one-character
+# switch each; their RAM on CPU (fp8 is widened on CPU) is in the note. Copy this file to $MODELS_HOME/comfyui/weights.tsv to change it
+# without a redeploy, then POST /comfy-setup.
+# on	folder	file	url	bytes	licence	graph	note
+1	upscale_models	RealESRGAN_x4plus.safetensors	https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged/resolve/main/RealESRGAN_x4plus.safetensors	66857836	bsd-3-clause	clean_realesrgan_upscale_video	64 MB; fine on CPU
+1	frame_interpolation	rife_v4.26.safetensors	https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/rife_v4.26.safetensors	22674688	mit	clean_rife_interpolate	22 MB; core FrameInterpolationModelLoader
+0	diffusion_models	flux-2-klein-4b.safetensors	https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/diffusion_models/flux-2-klein-4b.safetensors	7751105712	apache-2.0	clean_flux2_klein_t2i	7.8 GB; about 16 GB RAM on CPU
+0	text_encoders	qwen_3_4b.safetensors	https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors	8044982048	apache-2.0	clean_flux2_klein_t2i	8.0 GB
+0	vae	flux2-vae.safetensors	https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/vae/flux2-vae.safetensors	336211292	apache-2.0	clean_flux2_klein_t2i	336 MB
+0	diffusion_models	wan2.2_ti2v_5B_fp16.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors	9999658848	apache-2.0	clean_wan22_5b_ti2v	10 GB; about 20 GB RAM on CPU; minutes per frame
+0	text_encoders	umt5_xxl_fp8_e4m3fn_scaled.safetensors	https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors	6735906897	apache-2.0	clean_wan22_5b_ti2v clean_wan22_s2v_talk	6.7 GB; shared by both Wan graphs
+0	vae	wan2.2_vae.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan2.2_vae.safetensors	1409400960	apache-2.0	clean_wan22_5b_ti2v	1.4 GB
+0	checkpoints	flux1-schnell-fp8.safetensors	https://huggingface.co/Comfy-Org/flux1-schnell/resolve/main/flux1-schnell-fp8.safetensors	17236328572	apache-2.0	clean_flux_schnell_t2i	17 GB; about 48 GB RAM on CPU
+0	diffusion_models	qwen_image_edit_2511_fp8mixed.safetensors	https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/resolve/main/split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors	20533762817	apache-2.0	clean_qwen_image_edit_2511	20.5 GB; 20B params - a GPU job
+0	text_encoders	qwen_2.5_vl_7b_fp8_scaled.safetensors	https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors	9384670680	apache-2.0	clean_qwen_image_edit_2511	9.4 GB
+0	vae	qwen_image_vae.safetensors	https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors	253806246	apache-2.0	clean_qwen_image_edit_2511	254 MB
+0	loras	Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors	https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning/resolve/main/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors	849608296	apache-2.0	clean_qwen_image_edit_2511	850 MB; the Lightning switch
+0	diffusion_models	wan2.2_s2v_14B_fp8_scaled.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_s2v_14B_fp8_scaled.safetensors	16394832474	apache-2.0	clean_wan22_s2v_talk	16.4 GB; 14B params - a GPU job
+0	vae	wan_2.1_vae.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors	253815318	apache-2.0	clean_wan22_s2v_talk	254 MB
+0	audio_encoders	wav2vec2_large_english_fp16.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/audio_encoders/wav2vec2_large_english_fp16.safetensors	630997322	apache-2.0	clean_wan22_s2v_talk	631 MB

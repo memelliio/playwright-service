@@ -1,0 +1,6 @@
+# CUSTOM NODES - each pinned to a commit (2026-10-16). All 8 stored graphs run on core ComfyUI nodes, so every row starts off.
+# Tab-separated, no empty field (write -). on=1 is cloned at its commit and its requirements installed by comfyui-setup.sh.
+# on	name	url	commit	requirements	licence	note
+0	comfyui_controlnet_aux	https://github.com/Fannovel16/comfyui_controlnet_aux.git	0cd290477128d42cdc3e76a826a402d866e8c684	requirements.txt	apache-2.0	depth (Depth Anything V2 Small) for the splats' z, pose for sprites; fetches its own small weights on first use
+0	ComfyUI-Frame-Interpolation	https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git	26545cc2dd95bc3d27f056016300673bdeee78f5	requirements-no-cupy.txt	mit	not needed: RIFE 4.26 is core (FrameInterpolationModelLoader)
+0	ComfyUI-WanVideoWrapper	https://github.com/kijai/ComfyUI-WanVideoWrapper.git	088128b224242e110d3906c6750e9a3a348a659b	requirements.txt	apache-2.0	GPU only; the Wan graphs run on core nodes
