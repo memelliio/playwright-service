@@ -58,6 +58,9 @@ done <<EOF
 $(grep -v '^#' "$NODES" | grep -v '^[[:space:]]*$')
 EOF
 
+# 3b. the Memelli Playwright nodes (this service's own browser, step by step, as ComfyUI nodes) - always linked, from the image
+[ -d "$APP/comfy_nodes/memelli_playwright" ] && ln -sfn "$APP/comfy_nodes/memelli_playwright" "$C/ComfyUI/custom_nodes/memelli_playwright" && NODES_ON="$NODES_ON\"memelli_playwright\"," && say "node memelli_playwright (Playwright's own verbs)"
+
 # 4. the weights: the exact files the stored graphs load, into ComfyUI's own folder names
 W="$C/weights.tsv"; [ -f "$W" ] || W="$APP/scripts/comfyui-weights.tsv"
 HAVE=""; SKIPPED=""; REFUSED=""; FAILED=""

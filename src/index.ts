@@ -5,7 +5,6 @@ import { randomUUID, timingSafeEqual as timingSafeEqualBuf } from "node:crypto";
 import { verifiedBrowserScope, sameBrowserScope } from "./sessionScope";
 import { makeHands } from "./hands";
 import { makeComfy } from "./comfy";
-import { makeCeoAdmin } from "./ceoAdmin";
 
 const app = new Hono();
 const { Client, Pool } = pg;
@@ -2544,11 +2543,9 @@ async function queueStudioFromHands(contract: string, input: any, reason: string
     [`studio node studio.${name} (from the hands)`, JSON.stringify(payload), `studio.${name}`, `hands:${String(input?.path || input?.url || randomUUID())}`, reason]);
   return ins.rows[0]?.id || null;
 }
-/* both open only under Mel's CEO admin: his live stamp key:A=B, then his own login or his chain's lock (src/ceoAdmin.ts) */
-const ceo = makeCeoAdmin(dbPool);
-const hands = makeHands({ root: CHROME_PROFILE_ROOT, recordings: RECORDINGS_DIR, loadHotloadValue, queueStudio: queueStudioFromHands, log, gate: ceo.gate });
+const hands = makeHands({ root: CHROME_PROFILE_ROOT, recordings: RECORDINGS_DIR, loadHotloadValue, queueStudio: queueStudioFromHands, log });
 hands.routes(app);
-const comfy = makeComfy({ modelsHome: MODELS_HOME, log, open: ceo.open });
+const comfy = makeComfy({ modelsHome: MODELS_HOME, log });
 comfy.routes(app);
 
 /* THE CEOADMIN DOOR (Mel, 2026-09-30, CEO ADMIN INIFINITY LOCK #1519: "EVERY LAST ONE"). Any address carrying /CEOADMIN/

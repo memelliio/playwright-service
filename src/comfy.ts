@@ -7,14 +7,15 @@
  *                 volume and writes extra_model_paths.yaml, the one file ComfyUI finds its weights through); READY -> the server
  *   POST /comfy-setup   run the setup again (after the MAA's list on the volume changes)
  *   the server    ComfyUI on 127.0.0.1 only (it has no lock of its own), CPU, restarted if it falls (at most 5 times in 10 minutes)
- *   /comfy/*      the ComfyUI API (/object_info, /prompt, /history/<id>, /view, /queue, /system_stats, /upload/image ...) under Mel's CEO admin
+ *   /comfy/*      the ComfyUI API (/object_info, /prompt, /history/<id>, /view, /queue, /system_stats, /upload/image ...) on the lock
  *   GET /comfy    setup and server state, READY.json, the last lines of each log
  * The graphs are the MAA's (control_store.comfyui_workflows); the studio node tool `comfy` (scripts/infinity_comfy.py) runs one. */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { lockOk } from "./hands";
 
-export function makeComfy(opts: { modelsHome: string; log: (...a: any[]) => void; open: (c: any) => Promise<{ ok: boolean; why?: string }> }) {
+export function makeComfy(opts: { modelsHome: string; log: (...a: any[]) => void }) {
   const C = path.join(opts.modelsHome, "comfyui");
   const READY = path.join(C, "READY.json");
   const PORT = Number(process.env.COMFYUI_PORT || 8188);
@@ -74,19 +75,19 @@ export function makeComfy(opts: { modelsHome: string; log: (...a: any[]) => void
 
   function routes(app: any) {
     app.get("/comfy", async (c: any) => {
-      { const o = await opts.open(c); if (!o.ok) return c.json({ ok: false, error: o.why }, 401); }
+      if (!lockOk(c.req.header("x-memelli-lock"))) return c.json({ ok: false, error: "the lock" }, 401);
       const stats = await up();
       return c.json({ ok: true, home: C, setup: S.setup, server: S.server, pid: S.pid, started_at: S.started_at, last_exit: S.last_exit,
         system_stats: stats, ready: ready(), setup_log: tail(path.join(C, "setup.log")), server_log: tail(path.join(C, "server.log")) });
     });
     /* fill the weights home again (after the MAA's list on the volume, $C/weights.tsv, changes) */
-    app.post("/comfy-setup", async (c: any) => {
-      { const o = await opts.open(c); if (!o.ok) return c.json({ ok: false, error: o.why }, 401); }
+    app.post("/comfy-setup", (c: any) => {
+      if (!lockOk(c.req.header("x-memelli-lock"))) return c.json({ ok: false, error: "the lock" }, 401);
       return c.json({ ok: true, started: runSetup(), setup: S.setup, log: path.join(C, "setup.log") });
     });
-    /* the ComfyUI API under Mel's CEO admin; the body passes through untouched (uploads are multipart) */
+    /* the ComfyUI API on the lock; the body passes through untouched (uploads are multipart) */
     app.all("/comfy/*", async (c: any) => {
-      { const o = await opts.open(c); if (!o.ok) return c.json({ ok: false, error: o.why }, 401); }
+      if (!lockOk(c.req.header("x-memelli-lock"))) return c.json({ ok: false, error: "the lock" }, 401);
       const u = new URL(c.req.url);
       const to = BASE + u.pathname.replace(/^\/comfy/, "") + u.search;
       const h = new Headers();

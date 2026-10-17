@@ -39,6 +39,7 @@ RUN printf '#!/bin/sh\nexec python3 /app/scripts/infinity_comfy.py "$@"\n' > /us
 # Where the Chrome profile lives. Cookies survive here between runs - see CHROME_PROFILE_DIR.
 RUN mkdir -p /var/lib/memelli-chrome/worker /var/lib/memelli-chrome/session /var/lib/memelli-chrome/recordings
 COPY scripts ./scripts
+COPY comfy_nodes ./comfy_nodes
 COPY src ./src
 # tini is PID 1 and reaps the dead Chrome children a walk leaves behind (423 zombies filled the 1000 process slots, 10-04).
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
