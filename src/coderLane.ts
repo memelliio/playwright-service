@@ -16,15 +16,15 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 
 const SOURCE = "claude-local-coder";
 
-function lockOk(header: string | undefined) {
-  const got = Buffer.from(String(header || ""));
-  if (!got.length) return false;
-  for (const want of [process.env.A, process.env.B]) {
-    const w = Buffer.from(String(want || ""));
-    if (w.length === got.length && timingSafeEqual(w, got)) return true;
-  }
-  return false;
+/* THE LANE HAS ITS OWN KEY - NOT A/B. A/B is the system master lock (opens the MAA apply door, the script runner); a coder holding
+ * it is the jump box again. CODER_LANE_KEY (set on the Playwright service by Mel) opens /coder/in and /coder/log for the coder only.
+ * /coder/take and /coder/out are the MAA's reply side and stay on A/B. The coder NEVER holds A/B. */
+function keyOk(header: string | undefined, want: string | undefined) {
+  const got = Buffer.from(String(header || "")); const w = Buffer.from(String(want || ""));
+  return got.length > 0 && got.length === w.length && timingSafeEqual(got, w);
 }
+const coderKeyOk = (h?: string) => keyOk(h, process.env.CODER_LANE_KEY);
+const maaLockOk = (h?: string) => keyOk(h, process.env.A) || keyOk(h, process.env.B);
 
 export function makeCoderLane(opts: { root: string; log: (...a: any[]) => void }) {
   const dir = path.join(opts.root, "coder-lane");
@@ -41,9 +41,7 @@ export function makeCoderLane(opts: { root: string; log: (...a: any[]) => void }
   const byId = () => { const m = new Map(); for (const r of readAll()) m.set(r.id, { ...(m.get(r.id) || {}), ...r }); return m; };
 
   function routes(app: any) {
-    const gate = (c: any, next: any) => (lockOk(c.req.header("x-memelli-lock")) ? next() : c.json({ ok: false, error: "the lock" }, 401));
-
-    app.post("/coder/in", gate, async (c: any) => {
+    app.post("/coder/in", (c: any, next: any) => (coderKeyOk(c.req.header("x-coder-key")) ? next() : c.json({ ok: false, error: "coder key" }, 401)), async (c: any) => {
       const b = await c.req.json().catch(() => ({}));
       const id = "coder-" + randomUUID().slice(0, 12);
       const rec = { id, source: SOURCE, kind: String(b.kind || "request").slice(0, 60), title: String(b.title || "").slice(0, 200),
@@ -52,12 +50,12 @@ export function makeCoderLane(opts: { root: string; log: (...a: any[]) => void }
       return c.json({ ok: true, id, source: SOURCE, state: "open" });
     });
 
-    app.get("/coder/log", gate, (c: any) => {
+    app.get("/coder/log", (c: any, next: any) => (coderKeyOk(c.req.header("x-coder-key")) || maaLockOk(c.req.header("x-memelli-lock")) ? next() : c.json({ ok: false, error: "coder key or lock" }, 401)), (c: any) => {
       const items = [...byId().values()].sort((a, b) => String(b.at).localeCompare(String(a.at)));
       return c.json({ ok: true, source: SOURCE, open: items.filter((x) => x.state === "open").length, items });
     });
 
-    app.post("/coder/take", gate, async (c: any) => {
+    app.post("/coder/take", (c: any, next: any) => (maaLockOk(c.req.header("x-memelli-lock")) ? next() : c.json({ ok: false, error: "the lock" }, 401)), async (c: any) => {
       const { id, by } = await c.req.json().catch(() => ({}));
       const cur = byId().get(String(id));
       if (!cur) return c.json({ ok: false, error: "no such request" }, 404);
@@ -65,7 +63,7 @@ export function makeCoderLane(opts: { root: string; log: (...a: any[]) => void }
       return c.json({ ok: true, id, state: "taken" });
     });
 
-    app.post("/coder/out", gate, async (c: any) => {
+    app.post("/coder/out", (c: any, next: any) => (maaLockOk(c.req.header("x-memelli-lock")) ? next() : c.json({ ok: false, error: "the lock" }, 401)), async (c: any) => {
       const { id, answer, state } = await c.req.json().catch(() => ({}));
       const cur = byId().get(String(id));
       if (!cur) return c.json({ ok: false, error: "no such request" }, 404);
