@@ -5,7 +5,7 @@ RUN bun install
 # Real Google Chrome, not the bundled Chromium. Patchright names this first in its own setup.
 RUN bunx patchright install --with-deps chrome
 # A virtual display, so the browser runs headed. This box has no screen of its own.
-RUN apt-get update && apt-get install -y --no-install-recommends xvfb ffmpeg libvulkan1 mesa-vulkan-drivers git curl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb xauth ffmpeg libvulkan1 mesa-vulkan-drivers git curl ca-certificates && rm -rf /var/lib/apt/lists/*
 # The studio rack (Mel 2026-10-04: "the waves bundle plugins, like Pro Tools has - did you actually go get those?"). Open-source
 # LV2 plugins that ffmpeg (built with lv2) runs headless on the timeline: -af lv2=p=<URI>. Each Waves job has its open part:
 # auto-tune x42 fat1 · de-ess / vocal rider / comp / multiband / limiter LSP · L2-style maximizer ZaMaximX2 · air/exciter + tape Calf
