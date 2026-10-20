@@ -1,0 +1,61 @@
+# MEMELLI IO INC — authorized by Mel Briggs. THE SHARED TUNNEL (Mel, 2026-10-20: "it's your tunnel ... we share it, you don't
+# own it ... it's the real read, write, 1080p, etc ... it's all right there"). playwright-service IS the real executor the main
+# node's walk.mjs feeds via spawn_work: real browser read (/navigate /scrape /eval), real write (/fill /click /submit), 1080p/4K
+# capture (/screenshot-4k /screencast /recording), the credit pull (handleCreditMonitoring -> runPlaywrightScript, hotloaded
+# handler.script), the FreeCut render. It was Railway-coupled with NO render.yaml — this is the blueprint done right so it deploys
+# on Render as its OWN line (separate node, never touches www). The formula itself is hotloaded data (control_store), not redeployed.
+services:
+  - type: web
+    name: Memelli Infinity Dynamic Deploy Playwright Tunnel
+    runtime: docker
+    repo: https://github.com/memelliio/playwright-service
+    branch: master
+    region: virginia
+    plan: standard            # Chrome + xvfb + ffmpeg + the studio rack need real RAM/CPU; raise if ComfyUI weights run here
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health  # open, returns 200 JSON (index.ts). Render sets PORT; the code honors it and binds :: so the probe reaches it.
+    autoDeployTrigger: "off"  # the shared tunnel is its own line; deploy it on the coder's word, never on www's clock
+    disk:
+      # Chrome profiles, recordings (1080p/4K mp4), ComfyUI weights all persist here (the code's /var/lib/memelli-chrome).
+      # A disk forces single-instance — fine: the Chrome profile is single-writer by design (profileInUse guard).
+      name: tunnelmedia
+      mountPath: /var/lib/memelli-chrome
+      sizeGB: 20
+    envVars:
+      # the SHARED Postgres (control_store schema) — the one store the main node writes; the tunnel reads its spawn_work + writes credit rows.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: Memelli Infinity Dynamic Redeploy Control Store
+          property: connectionString
+      # the lock the ownerGate + hands check (A/B). Secrets — set in the dashboard, never in the file.
+      - key: A
+        sync: false
+      - key: B
+        sync: false
+      # LiveKit (the agent's live room + egress) — Railway→Render: egress uses the Render internal host, NOT RAILWAY_PRIVATE_DOMAIN (fixed in code).
+      - key: LIVEKIT_KEYS
+        sync: false
+      - key: LIVEKIT_INTERNAL_URL
+        sync: false
+      # the WebShare US proxy the real reads route through (SmartCredit, the bureaus)
+      - key: PLAYWRIGHT_PROXY_SERVER
+        sync: false
+      - key: PLAYWRIGHT_PROXY_USERNAME
+        sync: false
+      - key: PLAYWRIGHT_PROXY_PASSWORD
+        sync: false
+      - key: PLAYWRIGHT_PROXY_BYPASS
+        sync: false
+      # where the browser profile + the 1080p/4K recordings land (match the disk mount)
+      - key: CHROME_PROFILE_DIR
+        value: /var/lib/memelli-chrome
+      - key: PLAYWRIGHT_RECORDINGS_DIR
+        value: /var/lib/memelli-chrome/recordings
+      - key: MODELS_HOME
+        value: /var/lib/memelli-chrome/models
+      # the spawn wake channel (Postgres NOTIFY) the main node pings so the tunnel claims work at once, not on a poll delay
+      - key: SPAWN_WAKE_CHANNEL
+        sync: false
+      - key: TZ
+        value: America/New_York
