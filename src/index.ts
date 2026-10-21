@@ -1777,6 +1777,12 @@ async function startSpawnWorker() {
     updated_at timestamptz not null default now()
   )`);
   await client.query(`create index if not exists spawn_work_pending_idx on control_store.spawn_work (status, priority desc, created_at)`);
+  /* the columns finishWork + claimWork use beyond the create above (a table that already existed from a first boot gets them
+   * added here, so the drain's UPDATE never hits 42703 "column does not exist"). result/result_json/model_used/ran_at. */
+  await client.query(`alter table control_store.spawn_work add column if not exists result text`);
+  await client.query(`alter table control_store.spawn_work add column if not exists result_json jsonb`);
+  await client.query(`alter table control_store.spawn_work add column if not exists model_used text`);
+  await client.query(`alter table control_store.spawn_work add column if not exists ran_at timestamptz`);
   await client.query(`listen ${SPAWN_CHANNEL}`);
   spawnListenerConnectedAt = new Date().toISOString();
   void drainOnce().then(() => {
