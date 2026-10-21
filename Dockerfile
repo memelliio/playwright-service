@@ -6,6 +6,12 @@ RUN bun install
 RUN bunx patchright install --with-deps chrome
 # A virtual display, so the browser runs headed. This box has no screen of its own.
 RUN apt-get update && apt-get install -y --no-install-recommends xvfb xauth ffmpeg libvulkan1 mesa-vulkan-drivers git curl ca-certificates && rm -rf /var/lib/apt/lists/*
+# The box's sound (Mel 2026-10-20: "YOU GET THE MIC ... THAT'S THE AGENT'S REAL MIC TOO" · "FREECUT HAS THE SOUND ... FREECUT IS THE SAME
+# HEADLESS"): it had a screen (xvfb) but no sound device, so a voice page here answered "Requested device not found" and FreeCut's
+# Chrome had nowhere to play. PulseAudio gives the same headless Chrome a real one - scripts/agent-audio.sh: the speaker "agent_speaker"
+# (where her voice and FreeCut play) and the mic "agent_mic" (what /mic/say speaks into). espeak-ng is the voice /mic/say uses.
+RUN apt-get update && for p in pulseaudio pulseaudio-utils espeak-ng; do       apt-get install -y --no-install-recommends "$p" || echo "AGENT SOUND: package not available here: $p";     done && rm -rf /var/lib/apt/lists/*
+ENV PULSE_RUNTIME_PATH=/tmp/pulse-agent
 # The studio rack (Mel 2026-10-04: "the waves bundle plugins, like Pro Tools has - did you actually go get those?"). Open-source
 # LV2 plugins that ffmpeg (built with lv2) runs headless on the timeline: -af lv2=p=<URI>. Each Waves job has its open part:
 # auto-tune x42 fat1 · de-ess / vocal rider / comp / multiband / limiter LSP · L2-style maximizer ZaMaximX2 · air/exciter + tape Calf
@@ -43,4 +49,5 @@ COPY comfy_nodes ./comfy_nodes
 COPY src ./src
 # tini is PID 1 and reaps the dead Chrome children a walk leaves behind (423 zombies filled the 1000 process slots, 10-04).
 ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
-CMD ["xvfb-run", "-a", "--server-args=-screen 0 1440x900x24", "bun", "src/index.ts"]
+# the sound comes up first (a failure is logged, the service still starts), then the screen and the service, as before
+CMD ["sh", "-c", "sh /app/scripts/agent-audio.sh; exec xvfb-run -a --server-args='-screen 0 1440x900x24' bun src/index.ts"]
