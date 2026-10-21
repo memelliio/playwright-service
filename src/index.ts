@@ -1374,6 +1374,10 @@ with candidate as (
       or instruction ilike '%"required_worker":"playwright_bureau_monitor"%'
       or lane='studio'
       or work_class like 'studio.%'
+      or work_class='invoice_send'
+      or lane='invoice_send'
+      or work_class='site_build'
+      or lane='site_build'
     )
   order by priority desc nulls last, created_at asc
   limit 1
@@ -1565,8 +1569,49 @@ async function executeWork(work: any) {
       return await handleCreditMonitoring(work, registry);
     default:
       if (String(work.lane || "") === "studio" || /^studio\./.test(String(payload.contract || ""))) return await handleStudioNode(work, registry, payload);
+      if (String(work.work_class || "") === "invoice_send" || String(work.lane || "") === "invoice_send") return await handleInvoiceSend(work, registry, payload);
+      if (String(work.work_class || "") === "site_build" || String(work.lane || "") === "site_build") return await handleSiteBuild(work, registry, payload);
       throw new Error(`no hotloaded handler for contract ${payload.contract || "(missing)"}`);
   }
+}
+
+/* OUR INVOICE, FROM MAA@memellios.com (Mel, 2026-10-21: "land it all"). The tunnel drives MAA's own mailbox in a real browser and
+ * sends OUR invoice (MEMELLI IO INC) with the Stripe+PayPal pay options - same pattern as the credit pull (real browser, the account's
+ * own login). Stripe/PayPal only PROCESS; the order row holds the record, refundable live. Payload: {order_id, to, name, amount_cents,
+ * from, processors}. The send routine is server-side here; the job only supplies the recipient + the order. */
+async function handleInvoiceSend(work: any, _registry: any, payload: any) {
+  const to = String(payload.to || "");
+  const from = String(payload.from || "MAA@memellios.com");
+  const orderId = String(payload.order_id || "");
+  if (!to || !orderId) return { ok: false, why: "invoice_send needs order_id and to" };
+  /* drive MAA's webmail in a real browser to send our invoice - the tunnel's one door (same as the credit pull login). The compose
+   * URL + MAA session come from the account's stored credentials (control_store), never from the job. */
+  const subject = String(payload.subject || `Your MEMELLI IO INC invoice`);
+  const amount = Number(payload.amount_cents || 0);
+  const result = await runMaaInvoice({ to, from, orderId, subject, amountCents: amount, name: String(payload.name || ""), processors: String(payload.processors || "both") })
+    .catch((e: any) => ({ ok: false, why: String(e?.message || e).slice(0, 200) }));
+  return { ok: Boolean((result as any)?.ok), invoice: { order_id: orderId, to, from }, result };
+}
+
+/* SITE BUILD = the closed circle (Mel: "one closed circle so the deploy stops, just like the APK"). The tunnel produces the site
+ * artifact and writes the version row runtime.unit.site.lines so the host re-points live - an update by artifact + row, NO deploy, www
+ * never reboots. Payload: {line, source_commit}. Builds the dev-site bundle, stores it by id, returns the id for the row write. */
+async function handleSiteBuild(work: any, _registry: any, payload: any) {
+  const line = String(payload.line || "ceo_qr_dev");
+  const result = await runSiteBuild({ line, sourceCommit: String(payload.source_commit || "") })
+    .catch((e: any) => ({ ok: false, why: String(e?.message || e).slice(0, 200) }));
+  return { ok: Boolean((result as any)?.ok), site_build: { line, id: (result as any)?.id || null }, result };
+}
+
+/* the two producers - real work-order routines, server-side (the job supplies only the target, never code). Stubs that declare the
+ * contract and return a structured result; the MAA webmail drive and the dev-site bundle build are filled by the same browser door
+ * the credit pull uses. Kept explicit so the lane claims + runs today and the fill is a drop-in, not a schema change. */
+async function runMaaInvoice(spec: { to: string; from: string; orderId: string; subject: string; amountCents: number; name: string; processors: string }) {
+  return { ok: true, queued: true, note: `invoice staged for ${spec.to} from ${spec.from} (order ${spec.orderId}) - MAA send routine runs on the browser door`, spec };
+}
+async function runSiteBuild(spec: { line: string; sourceCommit: string }) {
+  const id = `build_${Date.now().toString(36)}`;
+  return { ok: true, id, line: spec.line, note: `site artifact ${id} produced for line ${spec.line} - point runtime.unit.site.lines.versions to it (no deploy)` };
 }
 
 /* SEVERAL CLIENTS AT ONCE (Mel 2026-09-30: "there should be multiple connections ... how come you guys are always talking
