@@ -1783,6 +1783,15 @@ async function startSpawnWorker() {
   await client.query(`alter table control_store.spawn_work add column if not exists result_json jsonb`);
   await client.query(`alter table control_store.spawn_work add column if not exists model_used text`);
   await client.query(`alter table control_store.spawn_work add column if not exists ran_at timestamptz`);
+  /* the analytics record the worker writes per job (recordSpawnAnalytics) - also a Railway table never created on Render,
+   * so a claimed job threw 'relation control_store.spawn_analytics_event does not exist' and its analytics never landed. */
+  await client.query(`create table if not exists control_store.spawn_analytics_event (
+    id text primary key,
+    event_category text,
+    event_name text,
+    properties jsonb,
+    created_at timestamptz not null default now()
+  )`);
   await client.query(`listen ${SPAWN_CHANNEL}`);
   spawnListenerConnectedAt = new Date().toISOString();
   void drainOnce().then(() => {
