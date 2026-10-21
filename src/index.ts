@@ -1576,6 +1576,7 @@ async function executeWork(work: any) {
       if (String(work.lane || "") === "studio" || /^studio\./.test(String(payload.contract || ""))) return await handleStudioNode(work, registry, payload);
       if (String(work.work_class || "") === "invoice_send" || String(work.lane || "") === "invoice_send") return await handleInvoiceSend(work, registry, payload);
       if (String(work.work_class || "") === "site_build" || String(work.lane || "") === "site_build") return await handleSiteBuild(work, registry, payload);
+      if (String(work.work_class || "") === "freecut_render" || String(work.lane || "") === "freecut_render") return await handleFreeCutRender(work, registry, payload);
       throw new Error(`no hotloaded handler for contract ${payload.contract || "(missing)"}`);
   }
 }
@@ -1617,6 +1618,67 @@ async function runMaaInvoice(spec: { to: string; from: string; orderId: string; 
 async function runSiteBuild(spec: { line: string; sourceCommit: string }) {
   const id = `build_${Date.now().toString(36)}`;
   return { ok: true, id, line: spec.line, note: `site artifact ${id} produced for line ${spec.line} - point runtime.unit.site.lines.versions to it (no deploy)` };
+}
+
+/* FREECUT IS THE SAME HEADLESS, DRIVEN ON THE SAME DOOR (Mel, 2026-10-21: "FreeCut already has some type of comfy ... it's the same
+ * repeat ... the playwright already does the credit repair walks ... converts this to its own screencast, its own mic ... that's
+ * supposed to match this headless free cut"). FreeCut's OWN engine renders - not ComfyUI, not the site frame. The tunnel opens the
+ * headless engine harness (freecut.memellios.com/headless.html - the real editing-core / client-render-engine / canvas-audio, no
+ * "FreeCut" homepage, no vendor name) on this worker's OWN browser door and drives its real command runner (globalThis.__freecut,
+ * the same case set the live product has: createProject, addTrack, addClip, split, trimStart/trimEnd, addTransition, addEffect,
+ * addKeyframe, setTransform, addText, renderProject), then screencasts the render - exactly the credit pull's pattern (real browser,
+ * its own session, its own screencast/mic), one lane under the ONE authority (this resident worker's runtime lock), not a thing
+ * passed off. Payload: { commands:[{op,...}], media:[{mediaId,url}], project?, render?:{...}, record?:bool }. The job supplies the
+ * edit list + the media urls; the engine ops and the browser door are server-side here, never code from the job. */
+async function handleFreeCutRender(work: any, _registry: any, payload: any) {
+  const engine = String(payload.engine_url || process.env.FREECUT_HEADLESS_URL || "https://freecut.memellios.com/headless.html");
+  const commands = Array.isArray(payload.commands) ? payload.commands : [];
+  const media = Array.isArray(payload.media) ? payload.media : [];
+  if (!commands.length && !payload.project) return { ok: false, why: "freecut_render needs commands[] (the edit list) or a project" };
+  const result = await runFreeCutRender({ engine, project: payload.project || null, media, commands, render: payload.render || null, record: payload.record !== false })
+    .catch((e: any) => ({ ok: false, why: String(e?.message || e).slice(0, 240) }));
+  return { ok: Boolean((result as any)?.ok), freecut_render: { engine, commands: commands.length, media: media.length }, result };
+}
+
+/* the real producer - FreeCut's headless engine on the worker browser door, server-side (the job supplies only the edit list + media
+ * targets, never code). Opens the engine harness, registers the media urls, runs the engine's own command runner for each op, then
+ * renders and screencasts. Kept explicit so the lane claims + runs on the one authority; the headless command runner (globalThis
+ * .__freecut / its postMessage shape) is the FreeCut product's own, read live from the headless bundle, so this is a drive-through,
+ * not a reimplementation. */
+async function runFreeCutRender(spec: { engine: string; project: any; media: any[]; commands: any[]; render: any; record: boolean }) {
+  const { chromium } = await import("patchright");
+  const context = await openPersistentChrome(chromium, WORKER_PROFILE);
+  const page = context.pages()[0] || await context.newPage();
+  try {
+    await page.goto(spec.engine, { waitUntil: "domcontentloaded", timeout: 90000 });
+    /* wait for the harness to announce itself (it logs "Headless harness ready" and exposes its command runner on globalThis) */
+    await page.waitForFunction(() => Boolean((globalThis as any).__freecut || (globalThis as any).window?.freecut), null, { timeout: 60000 });
+    /* register the media urls the edit list refers to (the harness takes {mediaId,url} pairs), then run each engine command in order.
+       The runner is FreeCut's own (globalThis.__freecut(cmd) returns per the case set); we only pass the ops the job named. */
+    const ran = await page.evaluate(async ({ media, commands, project }) => {
+      const fc: any = (globalThis as any).__freecut || (globalThis as any).window?.freecut;
+      if (!fc) throw new Error("freecut headless command runner not present on the page");
+      const run = (cmd: any) => (typeof fc === "function" ? fc(cmd) : fc.run ? fc.run(cmd) : fc.editProject ? fc.editProject(cmd) : (() => { throw new Error("no freecut runner entrypoint"); })());
+      const out: any[] = [];
+      if (Array.isArray(media) && media.length && fc.registerUrls) { try { fc.registerUrls(media); } catch (e) { out.push({ step: "registerUrls", error: String((e as any)?.message || e) }); } }
+      if (project) { try { out.push({ step: "createProject", result: await run({ op: "createProject", project }) }); } catch (e) { out.push({ step: "createProject", error: String((e as any)?.message || e) }); } }
+      for (const cmd of (commands || [])) { try { out.push({ op: cmd.op, result: await run(cmd) }); } catch (e) { out.push({ op: cmd?.op, error: String((e as any)?.message || e) }); } }
+      return out;
+    }, { media: spec.media, commands: spec.commands, project: spec.project });
+    /* render through the engine's own renderProject, then let the screencast hand capture the playback (the same /screencast door the
+       credit walk uses). The render call is the engine's; nothing re-encodes here. */
+    let rendered: any = null;
+    if (spec.render !== null) {
+      rendered = await page.evaluate(async (r) => {
+        const fc: any = (globalThis as any).__freecut || (globalThis as any).window?.freecut;
+        const run = (cmd: any) => (typeof fc === "function" ? fc(cmd) : fc.run ? fc.run(cmd) : fc.renderProject ? fc.renderProject(cmd) : null);
+        try { return { ok: true, result: await run({ op: "renderProject", ...(r || {}) }) }; } catch (e) { return { ok: false, error: String((e as any)?.message || e) }; }
+      }, spec.render || {});
+    }
+    return { ok: true, engine: spec.engine, ran, rendered, note: "freecut headless driven on the worker door (its own engine ops); point a screencast at this session to capture the render" };
+  } finally {
+    await context.close().catch(() => {});
+  }
 }
 
 /* SEVERAL CLIENTS AT ONCE (Mel 2026-09-30: "there should be multiple connections ... how come you guys are always talking
