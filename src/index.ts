@@ -855,7 +855,7 @@ async function openPersistentChrome(chromium: any, profileDir: string) {
   try {
     await ensureDisplay();
     await clearForeignChromeLock(profileDir);
-    return await chromium.launchPersistentContext(profileDir, {
+    const context = await chromium.launchPersistentContext(profileDir, {
       channel: "chrome",
       headless: false,
       viewport: null,
@@ -866,11 +866,16 @@ async function openPersistentChrome(chromium: any, profileDir: string) {
       // WebGPU on a CPU Vulkan adapter (Mel 2026-10-03, "deploy it"): FreeCut's 55 GPU effects (color grade, glow, grain, LUT...)
       // refused to render - "WebGPU is unavailable in this environment" - because this box has no GPU and Chrome had WebGPU off.
       // WebGPU only runs when a page asks for it (FreeCut's light engine), so other pages are not slowed the way software WebGL was.
-      args: ["--no-sandbox", "--disable-dev-shm-usage", "--enable-unsafe-webgpu", "--enable-features=Vulkan", "--ignore-gpu-blocklist", ...(process.env.PLAYWRIGHT_SOFTWARE_WEBGL === "1" ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist", "--use-vulkan=swiftshader"] : [])],
+      // her voice and FreeCut's audio play into the box's speaker (scripts/agent-audio.sh) without waiting for a click that never comes
+      args: ["--no-sandbox", "--disable-dev-shm-usage", "--enable-unsafe-webgpu", "--enable-features=Vulkan", "--ignore-gpu-blocklist", "--autoplay-policy=no-user-gesture-required", ...(process.env.PLAYWRIGHT_SOFTWARE_WEBGL === "1" ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist", "--use-vulkan=swiftshader"] : [])],
       ...(process.env.PLAYWRIGHT_PROXY_SERVER
         ? { proxy: { server: process.env.PLAYWRIGHT_PROXY_SERVER, username: process.env.PLAYWRIGHT_PROXY_USERNAME, password: process.env.PLAYWRIGHT_PROXY_PASSWORD, ...(process.env.PLAYWRIGHT_PROXY_BYPASS ? { bypass: process.env.PLAYWRIGHT_PROXY_BYPASS } : {}) } }
         : {}),
     });
+    /* THE AGENT'S MIC (Mel 2026-10-20: "YOU GET THE MIC ... THAT'S THE AGENT'S REAL MIC TOO"): the box's mic is real now (agent_mic,
+     * scripts/agent-audio.sh); a page here may open it without a permission prompt nobody is at the screen to answer. */
+    await context.grantPermissions(["microphone"]).catch(() => {});
+    return context;
   } catch (error) {
     profileInUse.delete(profileDir);
     throw error;
@@ -2487,6 +2492,33 @@ app.post("/recording", ownerGate, async (c) => {
   } catch (error) {
     return c.json({ error: "Failed to read recording", details: error.message }, 500);
   }
+});
+
+/* THE AGENT'S MIC AND SPEAKER (Mel 2026-10-20: "YOU GET THE MIC ... THAT'S THE AGENT'S REAL MIC TOO" · "FREECUT HAS THE SOUND ... FREECUT
+ * IS THE SAME HEADLESS"). scripts/agent-audio.sh gives the box PulseAudio devices; the browser here opens agent_mic as its mic and plays
+ * into agent_speaker. GET /mic says what is up; POST /mic/say {text} speaks a line into the mic (espeak-ng -> agent_mic_feed), so a
+ * voice page open in a session hears it exactly as it would hear a person - her real mic path, nothing patched on the page. */
+async function runTool(tool: string, args: string[], timeoutMs = 60000): Promise<{ ok: boolean; out: string; err: string }> {
+  const { execFile } = await import("node:child_process");
+  return new Promise((resolve) => execFile(tool, args, { timeout: timeoutMs, maxBuffer: 4 << 20 }, (error, out, err) =>
+    resolve({ ok: !error, out: String(out || "").trim(), err: String(err || (error && error.message) || "").trim().slice(0, 300) })));
+}
+app.get("/mic", ownerGate, async (c) => {
+  const info = await runTool("pactl", ["info"], 8000);
+  const source = await runTool("pactl", ["get-default-source"], 8000);
+  const sink = await runTool("pactl", ["get-default-sink"], 8000);
+  return c.json({ ok: info.ok && source.out === "agent_mic", sound: info.ok, mic: source.out || null, speaker: sink.out || null, ...(info.ok ? {} : { error: info.err || "pulseaudio is not running" }) });
+});
+app.post("/mic/say", ownerGate, async (c) => {
+  const { text, speed } = await c.req.json().catch(() => ({}));
+  const line = String(text || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 500);
+  if (!line) return c.json({ ok: false, error: "say what - {text}" }, 400);
+  const wav = "/tmp/mic-say-" + randomUUID() + ".wav";
+  const made = await runTool("espeak-ng", ["-v", "en-us", "-s", String(Math.min(220, Math.max(100, Number(speed) || 155))), "-w", wav, line], 30000);
+  if (!made.ok) return c.json({ ok: false, error: "espeak-ng: " + made.err }, 500);
+  const played = await runTool("paplay", ["--device=agent_mic_feed", wav], 120000);
+  await import("node:fs/promises").then((fs) => fs.rm(wav, { force: true })).catch(() => {});
+  return c.json(played.ok ? { ok: true, said: line, into: "agent_mic" } : { ok: false, error: "paplay: " + played.err }, played.ok ? 200 : 500);
 });
 
 // DELETE /session — close session
