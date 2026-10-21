@@ -1752,6 +1752,31 @@ async function startSpawnWorker() {
   } as any);
   await client.connect();
   await client.query(`set application_name to ${sqlText(DB_APPLICATION_NAME)}`);
+  /* SELF-WIRE THE SPAWN_WORK TABLE (Mel, 2026-10-21: "wire it ... the worker, the Postgres, the connections"). The worker
+   * drains control_store.spawn_work, but that table came over from Railway and was never created in the Render Postgres -
+   * so every boot threw 'relation control_store.spawn_work does not exist' and the worker never drained. Create it (and the
+   * schema) if absent, with exactly the columns claimWork/queue use, so the worker self-wires to its queue on the one store. */
+  await client.query(`create schema if not exists control_store`);
+  await client.query(`create table if not exists control_store.spawn_work (
+    id bigserial primary key,
+    topic text,
+    instruction text,
+    work_class text,
+    lane text,
+    priority int default 0,
+    source text,
+    parent_id bigint,
+    root_id bigint,
+    depth int default 0,
+    dedupe_key text unique,
+    reason_created text,
+    status text not null default 'pending',
+    attempt_count int default 0,
+    claimed_at timestamptz,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+  )`);
+  await client.query(`create index if not exists spawn_work_pending_idx on control_store.spawn_work (status, priority desc, created_at)`);
   await client.query(`listen ${SPAWN_CHANNEL}`);
   spawnListenerConnectedAt = new Date().toISOString();
   void drainOnce().then(() => {
